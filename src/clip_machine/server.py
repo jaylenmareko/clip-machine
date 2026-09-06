@@ -20,7 +20,7 @@ import webbrowser
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import config, pipeline, transcribe
+from . import config, modes, pipeline, transcribe
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -50,14 +50,16 @@ class _LogWriter:
         pass
 
 
-def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str) -> None:
+def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
+            mode: str) -> None:
     try:
         if config.WHISPER_MODEL != model:
             config.WHISPER_MODEL = model
             transcribe._model = None  # drop the cached model, it's the wrong size
         job["status"] = "running"
         with redirect_stdout(_LogWriter(job)):
-            out_dir = pipeline.run(source, max_clips=max_clips, use_llm=use_llm)
+            out_dir = pipeline.run(source, max_clips=max_clips, use_llm=use_llm,
+                                   mode=mode)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -68,17 +70,19 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str) -
         job["log"].append(f"ERROR  {type(e).__name__}: {e}")
 
 
-def _start_job(source: str, max_clips: int, use_llm: bool, model: str) -> dict:
+def _start_job(source: str, max_clips: int, use_llm: bool, model: str,
+               mode: str) -> dict:
     global _job
     with _job_lock:
         if _job and _job["status"] in ("queued", "running"):
             return {"error": "A job is already running."}
         _job = {
             "status": "queued", "log": [], "clips": [],
-            "source": source, "video_id": None, "error": None,
+            "source": source, "video_id": None, "error": None, "mode": mode,
         }
         threading.Thread(
-            target=_worker, args=(_job, source, max_clips, use_llm, model), daemon=True
+            target=_worker, args=(_job, source, max_clips, use_llm, model, mode),
+            daemon=True,
         ).start()
         return {"ok": True}
 
@@ -166,7 +170,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         route = parsed.path
 
         if route == "/":
-            self._send_html(PAGE)
+            self._send_html(_render_page())
         elif route == "/api/status":
             free = transcribe.free_ram_gb()
             job = _job or {"status": "idle", "log": [], "clips": []}
@@ -207,6 +211,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             int(data.get("max_clips", 6)),
             bool(data.get("use_llm", False)),
             data.get("model") or config.WHISPER_MODEL,
+            data.get("mode") or modes.DEFAULT,
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -236,7 +241,18 @@ PAGE = r"""<!doctype html>
   input,select{width:100%;background:#0f131b;border:1px solid var(--line);color:var(--text);
     border-radius:8px;padding:10px 12px;font:inherit}
   input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
-  .row{display:grid;grid-template-columns:1fr 120px 150px;gap:12px}
+  .row{display:grid;grid-template-columns:1fr 100px 140px;gap:12px}
+  .row-mode{margin-top:12px}
+  .modes{display:flex;gap:8px;flex-wrap:wrap}
+  .mode{border:1px solid var(--line);background:#0f131b;border-radius:8px;
+    padding:8px 12px;cursor:pointer;font-size:13px;color:var(--muted);user-select:none}
+  .mode:hover{border-color:#39435a;color:var(--text)}
+  .mode.on{border-color:var(--accent);color:var(--text);background:#16223a}
+  .mode small{display:block;font-size:11px;opacity:.7;margin-top:2px}
+  .chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+  .chip{font-size:10.5px;letter-spacing:.02em;background:#1b2434;border:1px solid var(--line);
+    color:#9fb4d8;border-radius:999px;padding:2px 7px}
+  .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
   button{background:var(--accent);color:#0a1020;border:0;border-radius:8px;
     padding:10px 20px;font:600 14px/1 inherit;cursor:pointer}
@@ -288,6 +304,10 @@ PAGE = r"""<!doctype html>
       </select>
     </div>
   </div>
+  <div class="row-mode">
+    <label>What kind of moment to hunt for</label>
+    <div class="modes" id="modes"></div>
+  </div>
   <div class="row2">
     <button id="go">Generate clips</button>
     <label class="check"><input type="checkbox" id="llm"> Ollama rerank (skip if not installed)</label>
@@ -307,6 +327,19 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = id => document.getElementById(id);
 let running = false;
+let mode = 'balanced';
+
+const MODES = __MODES__;
+const AUDIO_SIGNALS = new Set(['loud','animated','fast']);
+
+$('modes').innerHTML = MODES.map(m =>
+  `<div class="mode${m.key===mode?' on':''}" data-k="${m.key}">${m.label}<small>${m.blurb}</small></div>`
+).join('');
+$('modes').onclick = e => {
+  const el = e.target.closest('.mode'); if (!el) return;
+  mode = el.dataset.k;
+  [...$('modes').children].forEach(c => c.classList.toggle('on', c.dataset.k === mode));
+};
 
 $('go').onclick = async () => {
   const source = $('src').value.trim();
@@ -315,7 +348,7 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source, max_clips:+$('n').value,
+    body: JSON.stringify({ source, max_clips:+$('n').value, mode,
                            use_llm:$('llm').checked, model:$('model').value })
   });
   const j = await r.json();
@@ -324,12 +357,15 @@ $('go').onclick = async () => {
 
 function card(c, vid){
   const src = `/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.file)}`;
+  const chips = (c.signals||[]).map(s =>
+    `<span class="chip${AUDIO_SIGNALS.has(s)?' aud':''}">${s.replace(/[<>&]/g,'')}</span>`).join('');
   return `<div class="clip">
     <video src="${src}" controls preload="metadata"></video>
     <div class="meta">
       <p class="hook">${(c.hook||'').replace(/[<>&]/g,'')}</p>
       <div class="stats"><span>${c.duration}s</span><span>@${Math.round(c.start)}s</span>
-        <span>score <b>${c.score}</b></span></div>
+        <span>score <b>${c.score}</b></span>${c.mode?`<span>${c.mode}</span>`:''}</div>
+      ${chips?`<div class="chips">${chips}</div>`:''}
       <details><summary>transcript</summary><p>${(c.transcript||'').replace(/[<>&]/g,'')}</p></details>
     </div></div>`;
 }
@@ -375,6 +411,15 @@ library(); poll();
 </script>
 </div></body></html>
 """
+
+
+def _render_page() -> str:
+    """Inject the live mode list so the UI never drifts from modes.py."""
+    listing = [
+        {"key": m.key, "label": m.label, "blurb": m.blurb}
+        for m in modes.MODES.values()
+    ]
+    return PAGE.replace("__MODES__", json.dumps(listing))
 
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):

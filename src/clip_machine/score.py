@@ -1,7 +1,14 @@
 """Pick clip-worthy moments — fully local.
 
-Two stages, because feeding a whole transcript to a CPU-bound LLM is not
-viable on a GPU-less machine:
+Scoring is two parts:
+
+  base_quality  — is this a usable clip at all (self-contained, clean
+                  ending, sane length). Always applies.
+  mode_bonus    — is this the KIND of moment we're hunting for (exciting,
+                  controversial, funny, story, educational). See modes.py.
+
+Selection runs in two stages, because feeding a whole transcript to a
+CPU-bound LLM is not viable on a GPU-less machine:
 
   1. Heuristic prefilter over every candidate window (cheap, instant).
   2. Optional rerank of the ~25 survivors by a local Ollama model, which
@@ -11,7 +18,7 @@ viable on a GPU-less machine:
 import json
 import re
 
-from . import config
+from . import config, modes
 
 # Openers that prove the clip depends on earlier context.
 _CONTEXT_DEPENDENT = re.compile(
@@ -45,8 +52,7 @@ def build_sentences(words: list[dict]) -> list[dict]:
     sentences, current = [], []
     for w in words:
         current.append(w)
-        gap_next = False
-        if _TERMINAL.search(w["word"]) or gap_next:
+        if _TERMINAL.search(w["word"]):
             sentences.append(_pack(current))
             current = []
     if current:
@@ -83,7 +89,8 @@ def build_candidates(sentences: list[dict]) -> list[dict]:
     return candidates
 
 
-def heuristic_score(c: dict) -> float:
+def base_quality(c: dict) -> float:
+    """Is this a usable clip at all — regardless of what it's about."""
     text = c["text"].strip()
     first_sentence = re.split(r"(?<=[.!?])\s", text)[0]
     score = 0.0
@@ -123,6 +130,37 @@ def heuristic_score(c: dict) -> float:
     return score
 
 
+def mode_bonus(c: dict, mode, energy=None, median_wps: float = 0.0) -> tuple[float, list[str]]:
+    """What this mode is hunting for, on top of base quality.
+
+    Returns (bonus, fired signal names) so every pick stays explainable.
+    """
+    bonus, fired = mode.lexical(c["text"])
+
+    if energy is not None and energy.ok:
+        if mode.w_excite:
+            e = energy.excitement(c["start"], c["end"])
+            bonus += mode.w_excite * e
+            if e > 0.7:
+                fired.append("loud")
+        if mode.w_dynamics:
+            d = energy.dynamics(c["start"], c["end"])
+            bonus += mode.w_dynamics * d
+            if d > 0.7:
+                fired.append("animated")
+
+    # Talking faster than this speaker's own norm reads as urgency.
+    if mode.w_rate and median_wps > 0:
+        wps = len(c["text"].split()) / max(c["duration"], 1)
+        rel = (wps - median_wps) / median_wps
+        if rel > 0:
+            bonus += mode.w_rate * min(rel / 0.25, 1.0)
+            if rel > 0.15:
+                fired.append("fast")
+
+    return bonus, fired
+
+
 def _overlaps(a: dict, b: dict, threshold: float = 0.4) -> bool:
     overlap = min(a["end"], b["end"]) - max(a["start"], b["start"])
     if overlap <= 0:
@@ -142,8 +180,13 @@ def dedupe(candidates: list[dict], limit: int) -> list[dict]:
     return kept
 
 
-def _rerank_with_ollama(candidates: list[dict], max_clips: int) -> list[dict] | None:
-    """Return reordered candidates, or None if Ollama isn't available."""
+def _rerank_with_ollama(candidates: list[dict], max_clips: int, mode) -> list[dict] | None:
+    """Return reordered candidates, or None if Ollama isn't available.
+
+    The mode is described to the model too — this is where genuine semantic
+    judgment of "controversial" or "exciting" happens, versus the regex
+    lexicon which only catches surface phrasing.
+    """
     import requests  # local HTTP only
 
     listing = "\n\n".join(
@@ -152,10 +195,12 @@ def _rerank_with_ollama(candidates: list[dict], max_clips: int) -> list[dict] | 
     )
     prompt = (
         "You are picking short-form video clips from a longform transcript.\n"
-        "A good clip: hooks in its first 3 seconds, stands alone with zero outside "
-        "context, and has a clear payoff.\n\n"
+        f"You are specifically hunting for: {mode.label} — {mode.blurb}.\n\n"
+        "Every pick must also hook in its first 3 seconds, stand alone with zero "
+        "outside context, and have a clear payoff. Prefer a clip that genuinely "
+        f"matches '{mode.label}' over one that merely uses dramatic words.\n\n"
         f"Candidates:\n\n{listing}\n\n"
-        f"Return ONLY JSON: {{\"picks\": [<up to {max_clips} candidate numbers, best first>]}}"
+        f'Return ONLY JSON: {{"picks": [<up to {max_clips} candidate numbers, best first>]}}'
     )
 
     try:
@@ -173,28 +218,49 @@ def _rerank_with_ollama(candidates: list[dict], max_clips: int) -> list[dict] | 
         resp.raise_for_status()
         picks = json.loads(resp.json()["response"]).get("picks", [])
     except Exception as e:
-        print(f"  (Ollama unavailable — using heuristic ranking. {type(e).__name__})")
+        print(f"  (Ollama unavailable - using heuristic ranking. {type(e).__name__})")
         return None
 
     ordered = [candidates[i] for i in picks if isinstance(i, int) and 0 <= i < len(candidates)]
     return ordered or None
 
 
-def find_clips(words: list[dict], max_clips: int = 6, use_llm: bool = True) -> list[dict]:
+def _median_wps(candidates: list[dict]) -> float:
+    """This speaker's typical words-per-second, for relative rate comparison."""
+    rates = sorted(len(c["text"].split()) / max(c["duration"], 1) for c in candidates)
+    return rates[len(rates) // 2] if rates else 0.0
+
+
+def find_clips(
+    words: list[dict],
+    max_clips: int = 6,
+    use_llm: bool = True,
+    mode_key: str = modes.DEFAULT,
+    energy=None,
+) -> list[dict]:
+    """Pick clips matching `mode_key`, e.g. 'exciting' or 'controversial'."""
+    mode = modes.get(mode_key)
     sentences = build_sentences(words)
     candidates = build_candidates(sentences)
     if not candidates:
         return []
 
+    median_wps = _median_wps(candidates)
     for c in candidates:
-        c["score"] = heuristic_score(c)
+        base = base_quality(c)
+        bonus, fired = mode_bonus(c, mode, energy=energy, median_wps=median_wps)
+        c["base"] = round(base, 2)
+        c["bonus"] = round(bonus, 2)
+        c["signals"] = fired
+        c["score"] = base + bonus
 
     shortlist = dedupe(candidates, limit=max(max_clips * 4, 25))
 
-    ranked = _rerank_with_ollama(shortlist, max_clips) if use_llm else None
+    ranked = _rerank_with_ollama(shortlist, max_clips, mode) if use_llm else None
     final = (ranked or shortlist)[:max_clips]
 
     for n, c in enumerate(final, 1):
         c["title"] = f"clip_{n:02d}"
         c["hook"] = re.split(r"(?<=[.!?])\s", c["text"].strip())[0][:120]
+        c["mode"] = mode.key
     return final

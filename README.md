@@ -32,12 +32,53 @@ Output lands in `artifacts/clips/<video-id>/`:
 | Score | heuristics + optional Ollama | See below |
 | Cut + crop + caption | `ffmpeg`, single pass | 9:16 center crop, one encode |
 
-## How clips get picked
+## Picking WHAT kind of moment (modes)
 
-1. **Heuristic prefilter** — scores every candidate window on self-containedness (heavily penalizes clips that open on "and/so/but/he/this" — the #1 cause of clips that make no sense alone), hook-phrase match, clean ending, 30-60s length sweet spot, and speech density. Narrows hundreds of windows to ~25.
-2. **Optional local LLM rerank** — if Ollama is running, it ranks the shortlist. It only ever sees the short candidate text, never the full transcript, which is what makes this feasible without a GPU. Not installed? The pipeline says so and uses the heuristic ranking.
+Pass `--mode` (CLI) or click a mode in the UI. Every mode still has to pass
+base quality — self-contained, clean ending, sane length — the mode only
+changes what gets a bonus on top.
 
-To enable the rerank:
+| Mode | Hunts for |
+|---|---|
+| `balanced` | General-purpose, clean and self-contained (default) |
+| `exciting` | High energy, big claims, raised voice |
+| `controversial` | Contrarian takes, called-out consensus |
+| `debate` | Podcast conflict — money/relationships/status takes, pushback |
+| `funny` | Laughter and comedic beats |
+| `story` | Personal narrative with a payoff |
+| `educational` | Clear explanation, steps, concrete numbers |
+
+```bash
+python -m clip_machine.pipeline "<source>" --mode debate
+```
+
+### Two signal families
+
+1. **Lexical** — regexes over the transcript, per mode (see `modes.py`).
+2. **Acoustic** — loudness percentiles from `audio_features.py`. This is the
+   one a keyword list cannot replicate: excitement is physical, and someone
+   raising their voice or speeding up is measurable straight from ffmpeg.
+   Every reading is a percentile against *that video's own* baseline, so
+   there are no tuned constants that only hold for one recording.
+
+Each clip records which signals fired (`signals` in manifest.json, chips in
+the UI) so picks stay explainable and the weights can be tuned against real
+output rather than guesswork.
+
+**Limits worth knowing:** the scorer always returns N clips, even when
+nothing genuinely matches the mode — it ranks relatively, it does not have a
+quality floor. And `funny` depends on Whisper emitting laughter tokens; on
+content with no laughter it quietly degrades to base quality + audio.
+
+### Optional local LLM rerank
+
+If Ollama is running, it reranks the ~25 shortlisted candidates and is told
+which mode it's hunting for — that's where real semantic judgment of
+"controversial" happens, versus the regex lexicon catching surface phrasing.
+It only ever sees the shortlist, never the full transcript, which is what
+makes it feasible without a GPU. Not installed? The pipeline says so and
+uses the heuristic ranking.
+
 ```bash
 winget install Ollama.Ollama
 ollama pull llama3.2:3b

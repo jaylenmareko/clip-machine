@@ -7,20 +7,21 @@ import json
 import time
 from pathlib import Path
 
-from . import caption, config, cut, download, score, transcribe
+from . import audio_features, caption, config, cut, download, modes, score, transcribe
 
 
-def run(source: str, max_clips: int = 6, use_llm: bool = True) -> Path:
+def run(source: str, max_clips: int = 6, use_llm: bool = True,
+        mode: str = modes.DEFAULT) -> Path:
     t0 = time.time()
 
-    print(f"[1/5] Fetching video: {source}")
+    print(f"[1/6] Fetching video: {source}")
     video_path, video_id = download.get_video(source)
     print(f"      -> {video_path.name}")
 
     out_dir = config.CLIPS_DIR / video_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[2/5] Transcribing locally (faster-whisper {config.WHISPER_MODEL}) — "
+    print(f"[2/6] Transcribing locally (faster-whisper {config.WHISPER_MODEL}) — "
           f"this is the slow part...")
     words_cache = config.WORK_DIR / f"{video_id}.words.json"
     if words_cache.exists():
@@ -34,11 +35,18 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True) -> Path:
     if not words:
         raise SystemExit("No speech found in that video.")
 
-    print(f"[3/5] Scoring clip candidates{' (+ local LLM rerank)' if use_llm else ''}...")
-    clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm)
+    print(f"[3/6] Reading audio energy (mode: {modes.get(mode).label})...")
+    energy = audio_features.EnergyProfile(
+        audio_features.energy_timeline(transcribe.extract_audio(video_path))
+    )
+    print(f"      -> {'energy profile ready' if energy.ok else 'no usable audio signal'}")
+
+    print(f"[4/6] Scoring clip candidates{' (+ local LLM rerank)' if use_llm else ''}...")
+    clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm,
+                             mode_key=mode, energy=energy)
     print(f"      -> {len(clips)} clips selected")
 
-    print("[4/5] Rendering vertical clips with burned-in captions...")
+    print("[5/6] Rendering vertical clips with burned-in captions...")
     manifest = []
     for n, c in enumerate(clips, 1):
         ass_path = caption.build_ass(
@@ -49,7 +57,9 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True) -> Path:
         ass_path.unlink(missing_ok=True)
 
         print(f"      -> clip_{n:02d}.mp4  "
-              f"({c['duration']:.0f}s @ {c['start']:.0f}s)  \"{c['hook'][:50]}\"")
+              f"({c['duration']:.0f}s @ {c['start']:.0f}s)  "
+              f"[{','.join(c.get('signals', [])) or 'no signals'}]  "
+              f"\"{c['hook'][:44]}\"")
         manifest.append({
             "file": clip_path.name,
             "start": round(c["start"], 2),
@@ -57,12 +67,17 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True) -> Path:
             "duration": round(c["duration"], 2),
             "score": round(c["score"], 2),
             "hook": c["hook"],
+            "signals": c.get("signals", []),
+            "base": c.get("base"),
+            "bonus": c.get("bonus"),
+            "mode": c.get("mode", mode),
             "transcript": c["text"],
         })
 
-    print("[5/5] Writing manifest...")
+    print("[6/6] Writing manifest...")
     (out_dir / "manifest.json").write_text(
-        json.dumps({"source": source, "video_id": video_id, "clips": manifest}, indent=2),
+        json.dumps({"source": source, "video_id": video_id, "mode": mode,
+                    "clips": manifest}, indent=2),
         encoding="utf-8",
     )
 
@@ -76,8 +91,10 @@ def main() -> None:
     p.add_argument("--max-clips", type=int, default=6)
     p.add_argument("--no-llm", action="store_true",
                    help="skip the Ollama rerank, use heuristics only")
+    p.add_argument("--mode", default=modes.DEFAULT, choices=list(modes.MODES),
+                   help="what kind of moment to hunt for")
     args = p.parse_args()
-    run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm)
+    run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm, mode=args.mode)
 
 
 if __name__ == "__main__":
