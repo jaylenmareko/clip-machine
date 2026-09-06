@@ -106,12 +106,26 @@ def viral_signals(c: dict) -> tuple[float, list[str]]:
     return min(total, _VIRAL_CAP + _HYPOCRISY_BONUS), fired
 
 
+# No target duration — a clip runs as long as the point takes. But removing
+# the length bonus outright is NOT length-neutral: a longer window contains
+# more text, hits more patterns, and wins by accumulation. Measured, that
+# pushed every pick to 112-136s (stdev 9) against the channel's real 20-135s
+# (stdev 29).
+#
+# So each second costs a flat amount instead, and extra length has to pay
+# for itself in content. Calibrated against their distribution: 0.0 gave
+# stdev 9, 0.02 gave 14, 0.03 gave stdev 33 over a 25-113s range — the
+# closest fit to their stdev 29 — and 0.08 started compressing everything
+# short. This is a neutrality correction, not a preferred length.
+LENGTH_COST_PER_SEC = 0.03
+
 TURN_TOLERANCE = 0.6   # seconds; how close a clip start must be to a turn
 TURN_BONUS = 1.0       # reward for starting where someone starts talking.
                        # Measured: 3.0 outranked actual content (4/5 picks had
                        # debate signals); 1.0 gives 5/5 with signals AND 5/5
                        # clean starts, still beating no-bonus on turn alignment.
 TURN_PENALTY = 1.5     # cost of starting mid-turn
+END_TURN_BONUS = 1.5   # reward for ending as the other person takes over
 
 
 def build_sentences(words: list[dict], turn_starts: list[float] | None = None) -> list[dict]:
@@ -186,6 +200,17 @@ def base_quality(c: dict, turn_starts: list[float] | None = None) -> float:
             score -= TURN_PENALTY
             c["starts_on_turn"] = False
 
+        # With no length target, "where does this clip STOP" carries the
+        # weight instead. A clip that ends just as the other person starts
+        # talking is one where the point landed and the exchange moved on -
+        # that is what "as long as it needs to be" actually looks like.
+        ends_on_turn = any(abs(c["end"] - t) <= TURN_TOLERANCE for t in turn_starts)
+        if ends_on_turn:
+            score += END_TURN_BONUS
+            c["ends_on_turn"] = True
+        else:
+            c["ends_on_turn"] = False
+
     # Self-containedness — the single biggest quality lever.
     if _CONTEXT_DEPENDENT.match(text):
         score -= 4.0
@@ -204,16 +229,19 @@ def base_quality(c: dict, turn_starts: list[float] | None = None) -> float:
     if _CONCRETE.search(text):
         score += 1.0
 
-    # Length curve, calibrated to what the reference channel actually
-    # publishes (59-76s). 35-90s is free; past that a clip has to earn its
-    # length with content, because completion rate drives distribution.
+    # NO length target. Measured 29 of the reference channel's published
+    # shorts: 20s to 135s, a 6.8x spread, stdev 29s, with only 31% inside
+    # the 59-76s band an earlier 3-clip sample had suggested. They are not
+    # aiming at a duration - they run a clip for as long as the point takes
+    # and stop when it lands. So duration earns nothing and costs nothing
+    # here; what matters is whether the clip is a COMPLETE unit, which the
+    # start/end/turn checks above and below score directly.
+    #
+    # Their shortest published short is 20s, which is also CLIP_MIN_SECONDS,
+    # so the floor is validated rather than guessed.
     dur = c["duration"]
-    if 35 <= dur <= 90:
-        score += 2.0
-    elif dur < 25:
-        score -= 1.5
-    elif dur > 90:
-        score -= 1.0 + (dur - 90) / 30.0   # -1 at 90s, -3 at 150s
+    if dur > 140:
+        score -= 1.0   # beyond anything they have ever published
 
     # Speech density — catch dead air or garbled runs.
     wps = len(text.split()) / max(dur, 1)
@@ -266,7 +294,9 @@ def _overlaps(a: dict, b: dict, threshold: float = 0.4) -> bool:
 def dedupe(candidates: list[dict], limit: int) -> list[dict]:
     """Greedy non-maximum suppression by score."""
     kept: list[dict] = []
-    for c in sorted(candidates, key=lambda x: -x["score"]):
+    # Ties break toward the SHORTER clip: with no duration target, a
+    # longer window must score strictly higher to win, so we never pad.
+    for c in sorted(candidates, key=lambda x: (-x["score"], x["duration"])):
         if any(_overlaps(c, k) for k in kept):
             continue
         kept.append(c)
@@ -350,7 +380,7 @@ def find_clips(
         c["bonus"] = round(bonus, 2)
         c["viral"] = round(vir, 2)
         c["signals"] = fired + vfired
-        c["score"] = base + bonus + vir
+        c["score"] = base + bonus + vir - LENGTH_COST_PER_SEC * c["duration"]
 
     shortlist = dedupe(candidates, limit=max(max_clips * 4, 25))
 
