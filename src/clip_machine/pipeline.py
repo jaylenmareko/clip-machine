@@ -43,9 +43,20 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
     )
     print(f"      -> {'energy profile ready' if energy.ok else 'no usable audio signal'}")
 
+    # Speaker turns serve two purposes: they tell the scorer where a clip
+    # can cleanly START, and they drive the panel swaps at render time. So
+    # detect them once for the whole video rather than per clip.
+    turns: list[tuple[float, float, str]] = []
+    if layout == "split-auto":
+        print("[3b/6] Detecting speaker turns (whole video, chunked)...")
+        span = float(words[-1]["end"])
+        turns = speakers.active_speaker_segments(video_path, 0.0, span, verbose=True)
+        print(f"      -> {len(turns)} turns detected")
+    starts = speakers.turn_starts(turns) if turns else None
+
     print(f"[4/6] Scoring clip candidates{' (+ local LLM rerank)' if use_llm else ''}...")
     clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm,
-                             mode_key=mode, energy=energy)
+                             mode_key=mode, energy=energy, turn_starts=starts)
     print(f"      -> {len(clips)} clips selected")
 
     print("[5/6] Rendering vertical clips with burned-in captions...")
@@ -59,10 +70,10 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
         )
 
         swaps = None
-        if layout == "split-auto":
-            segs = speakers.active_speaker_segments(video_path, c["start"], c["end"])
-            swaps = speakers.swap_intervals(segs, c["start"])
-            c["speaker_switches"] = max(len(segs) - 1, 0)
+        if layout == "split-auto" and turns:
+            swaps = speakers.swap_intervals(turns, c["start"], c["end"])
+            inside = [t for t in turns if t[1] > c["start"] and t[0] < c["end"]]
+            c["speaker_switches"] = max(len(inside) - 1, 0)
 
         clip_path = out_dir / f"clip_{n:02d}.mp4"
         cut.render_clip(video_path, c["start"], c["end"], ass_path, clip_path,

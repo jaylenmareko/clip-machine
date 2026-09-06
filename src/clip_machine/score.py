@@ -21,9 +21,14 @@ import re
 from . import config, modes
 
 # Openers that prove the clip depends on earlier context.
+# The bare replies ("no", "yes", "okay"...) were added after a real debate
+# run produced clips opening on "No Was that translation..." and "Yes or
+# no?" — an answer to an unheard question is the worst possible hook.
 _CONTEXT_DEPENDENT = re.compile(
     r"^(and|so|but|because|then|anyway|also|plus|which|that's why|that is why"
-    r"|he|she|they|it|this|that|those|these|him|her|them)\b",
+    r"|he|she|they|it|this|that|those|these|him|her|them"
+    r"|no|yes|yeah|yep|nope|okay|ok|right|correct|exactly|sure|true|false"
+    r"|of course|absolutely|agreed|hold on|wait|well)\b",
     re.IGNORECASE,
 )
 
@@ -47,8 +52,28 @@ _CONCRETE = re.compile(r"(\$|\d+%|\d{2,}|one time|the first time|last (year|mont
 _TERMINAL = re.compile(r"[.!?]$")
 
 
-def build_sentences(words: list[dict]) -> list[dict]:
-    """Group the flat word list into sentences on terminal punctuation."""
+TURN_TOLERANCE = 0.6   # seconds; how close a clip start must be to a turn
+TURN_BONUS = 1.0       # reward for starting where someone starts talking.
+                       # Measured: 3.0 outranked actual content (4/5 picks had
+                       # debate signals); 1.0 gives 5/5 with signals AND 5/5
+                       # clean starts, still beating no-bonus on turn alignment.
+TURN_PENALTY = 1.5     # cost of starting mid-turn
+
+
+def build_sentences(words: list[dict], turn_starts: list[float] | None = None) -> list[dict]:
+    """Group the flat word list into sentences on terminal punctuation.
+
+    Splitting on detected speaker turns was tried and measurably made
+    things WORSE (3/5 clean clip starts vs 5/5): the turn detector carries
+    ~0.5s of smoothing lag, so its boundaries land mid-sentence and the
+    split manufactures fragments like "a simple yes or no?" and "case you
+    didn't understand". Splitting on long pauses hurt for the same reason.
+
+    Turns are still valuable — just as a SCORING signal in base_quality,
+    where "this clip happens to begin where someone starts talking" is a
+    bonus rather than a licence to cut the transcript there. `turn_starts`
+    is accepted here only to keep the call sites uniform.
+    """
     sentences, current = [], []
     for w in words:
         current.append(w)
@@ -89,11 +114,23 @@ def build_candidates(sentences: list[dict]) -> list[dict]:
     return candidates
 
 
-def base_quality(c: dict) -> float:
+def base_quality(c: dict, turn_starts: list[float] | None = None) -> float:
     """Is this a usable clip at all — regardless of what it's about."""
     text = c["text"].strip()
     first_sentence = re.split(r"(?<=[.!?])\s", text)[0]
     score = 0.0
+
+    # Starting exactly where someone begins talking is the single best
+    # predictor of a clip that stands alone. Starting mid-turn is the
+    # worst, and punctuation alone cannot tell the difference.
+    if turn_starts:
+        starts_on_turn = any(abs(c["start"] - t) <= TURN_TOLERANCE for t in turn_starts)
+        if starts_on_turn:
+            score += TURN_BONUS
+            c["starts_on_turn"] = True
+        else:
+            score -= TURN_PENALTY
+            c["starts_on_turn"] = False
 
     # Self-containedness — the single biggest quality lever.
     if _CONTEXT_DEPENDENT.match(text):
@@ -237,17 +274,18 @@ def find_clips(
     use_llm: bool = True,
     mode_key: str = modes.DEFAULT,
     energy=None,
+    turn_starts: list[float] | None = None,
 ) -> list[dict]:
     """Pick clips matching `mode_key`, e.g. 'exciting' or 'controversial'."""
     mode = modes.get(mode_key)
-    sentences = build_sentences(words)
+    sentences = build_sentences(words, turn_starts=turn_starts)
     candidates = build_candidates(sentences)
     if not candidates:
         return []
 
     median_wps = _median_wps(candidates)
     for c in candidates:
-        base = base_quality(c)
+        base = base_quality(c, turn_starts=turn_starts)
         bonus, fired = mode_bonus(c, mode, energy=energy, median_wps=median_wps)
         c["base"] = round(base, 2)
         c["bonus"] = round(bonus, 2)
