@@ -20,7 +20,7 @@ import webbrowser
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import config, modes, pipeline, transcribe
+from . import caption, config, cut, modes, pipeline, transcribe
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -51,7 +51,7 @@ class _LogWriter:
 
 
 def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
-            mode: str) -> None:
+            mode: str, style: str, layout: str) -> None:
     try:
         if config.WHISPER_MODEL != model:
             config.WHISPER_MODEL = model
@@ -59,7 +59,7 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
         job["status"] = "running"
         with redirect_stdout(_LogWriter(job)):
             out_dir = pipeline.run(source, max_clips=max_clips, use_llm=use_llm,
-                                   mode=mode)
+                                   mode=mode, style=style, layout=layout)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -71,7 +71,7 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
 
 
 def _start_job(source: str, max_clips: int, use_llm: bool, model: str,
-               mode: str) -> dict:
+               mode: str, style: str, layout: str) -> dict:
     global _job
     with _job_lock:
         if _job and _job["status"] in ("queued", "running"):
@@ -81,7 +81,8 @@ def _start_job(source: str, max_clips: int, use_llm: bool, model: str,
             "source": source, "video_id": None, "error": None, "mode": mode,
         }
         threading.Thread(
-            target=_worker, args=(_job, source, max_clips, use_llm, model, mode),
+            target=_worker,
+            args=(_job, source, max_clips, use_llm, model, mode, style, layout),
             daemon=True,
         ).start()
         return {"ok": True}
@@ -212,6 +213,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             bool(data.get("use_llm", False)),
             data.get("model") or config.WHISPER_MODEL,
             data.get("mode") or modes.DEFAULT,
+            data.get("style") or caption.DEFAULT_STYLE,
+            data.get("layout") or "center",
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -304,6 +307,19 @@ PAGE = r"""<!doctype html>
       </select>
     </div>
   </div>
+  <div class="row" style="margin-top:12px">
+    <div>
+      <label for="style">Caption style</label>
+      <select id="style">__STYLE_OPTS__</select>
+    </div>
+    <div style="grid-column:span 2">
+      <label for="layout">Layout</label>
+      <select id="layout">
+        <option value="center">Center crop — single speaker</option>
+        <option value="split">Split-screen — two people side by side in source</option>
+      </select>
+    </div>
+  </div>
   <div class="row-mode">
     <label>What kind of moment to hunt for</label>
     <div class="modes" id="modes"></div>
@@ -349,7 +365,8 @@ $('go').onclick = async () => {
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ source, max_clips:+$('n').value, mode,
-                           use_llm:$('llm').checked, model:$('model').value })
+                           use_llm:$('llm').checked, model:$('model').value,
+                           style:$('style').value, layout:$('layout').value })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
@@ -419,7 +436,13 @@ def _render_page() -> str:
         {"key": m.key, "label": m.label, "blurb": m.blurb}
         for m in modes.MODES.values()
     ]
-    return PAGE.replace("__MODES__", json.dumps(listing))
+    style_opts = "".join(
+        f'<option value="{s.key}"{" selected" if s.key == caption.DEFAULT_STYLE else ""}>'
+        f"{s.label}</option>"
+        for s in caption.STYLES.values()
+    )
+    return (PAGE.replace("__MODES__", json.dumps(listing))
+                .replace("__STYLE_OPTS__", style_opts))
 
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):

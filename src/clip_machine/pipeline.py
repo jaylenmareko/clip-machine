@@ -11,7 +11,8 @@ from . import audio_features, caption, config, cut, download, modes, score, tran
 
 
 def run(source: str, max_clips: int = 6, use_llm: bool = True,
-        mode: str = modes.DEFAULT) -> Path:
+        mode: str = modes.DEFAULT, style: str = caption.DEFAULT_STYLE,
+        layout: str = "center") -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -49,11 +50,14 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
     print("[5/6] Rendering vertical clips with burned-in captions...")
     manifest = []
     for n, c in enumerate(clips, 1):
+        # Captions straddle the seam on a split, sit in the lower third otherwise.
         ass_path = caption.build_ass(
-            words, c["start"], c["end"], out_dir / f"clip_{n:02d}.ass"
+            words, c["start"], c["end"], out_dir / f"clip_{n:02d}.ass",
+            style=style, position="seam" if layout == "split" else "lower",
         )
         clip_path = out_dir / f"clip_{n:02d}.mp4"
-        cut.render_clip(video_path, c["start"], c["end"], ass_path, clip_path)
+        cut.render_clip(video_path, c["start"], c["end"], ass_path, clip_path,
+                        layout=layout)
         ass_path.unlink(missing_ok=True)
 
         print(f"      -> clip_{n:02d}.mp4  "
@@ -93,8 +97,13 @@ def main() -> None:
                    help="skip the Ollama rerank, use heuristics only")
     p.add_argument("--mode", default=modes.DEFAULT, choices=list(modes.MODES),
                    help="what kind of moment to hunt for")
+    p.add_argument("--style", default=caption.DEFAULT_STYLE, choices=list(caption.STYLES),
+                   help="caption look")
+    p.add_argument("--layout", default="center", choices=list(cut.LAYOUTS),
+                   help="center crop, or 50/50 split-screen for a two-person source")
     args = p.parse_args()
-    run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm, mode=args.mode)
+    run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
+        mode=args.mode, style=args.style, layout=args.layout)
 
 
 if __name__ == "__main__":
