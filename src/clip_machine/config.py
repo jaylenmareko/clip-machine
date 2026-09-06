@@ -12,11 +12,17 @@ WORK_DIR = PROJECT_ROOT / "artifacts" / "_work"
 
 # --- transcription (local, faster-whisper) ---
 # tiny.en / base.en / small.en / medium.en — bigger = better + slower.
-# base.en is the default because this is a 16GB machine that in practice
-# runs with ~2GB free (OneDrive + browsers); small.en gets OOM-killed under
-# that pressure. Bump to small.en via env when the machine is quiet.
-WHISPER_MODEL = os.environ.get("CLIP_WHISPER_MODEL", "base.en")
+# tiny.en is the default now that captions are off. The transcript became an
+# index rather than output: nobody reads the words, so transcription errors
+# ("designists" for Zionists) no longer reach the viewer. It only has to be
+# good enough to locate moments and match scoring phrases. Bump to base.en
+# via env if captions are turned back on - burned-in text is unforgiving.
+WHISPER_MODEL = os.environ.get("CLIP_WHISPER_MODEL", "tiny.en")
 WHISPER_THREADS = int(os.environ.get("CLIP_WHISPER_THREADS", "8"))
+# Batched inference: ~2.5x faster than sequential on CPU, same word
+# timestamps. Set to 1 to disable. Larger batches use more RAM, which is
+# the binding constraint on this machine.
+BATCH_SIZE = int(os.environ.get("CLIP_BATCH_SIZE", "8"))
 
 # --- clip scoring (local, Ollama; falls back to heuristics if absent) ---
 OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")

@@ -45,12 +45,23 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
     )
     print(f"      -> {'energy profile ready' if energy.ok else 'no usable audio signal'}")
 
-    # Speaker turns serve two purposes: they tell the scorer where a clip
-    # can cleanly START, and they drive the panel swaps at render time. So
-    # detect them once for the whole video rather than per clip.
+    # Speaker turns serve two purposes: a scoring bonus for clips that start
+    # and end on a turn, and the panel swaps at render time.
+    #
+    # Detecting them across a WHOLE video is expensive - ffmpeg has to decode
+    # every frame, and lowering the sample rate does not help because decode
+    # is the cost, not the sampling (measured: 6fps/480px and 2fps/320px both
+    # took the same time). On a 2-hour source that is ~18 minutes.
+    #
+    # The swaps only need the SELECTED clips though - about 8 minutes of video
+    # instead of 120. And the scoring bonus turns out to be optional: with
+    # TURN_BONUS at 0 the picks were still 5/5 clean starts and 5/5 with real
+    # signals, because punctuation-based sentence splitting already guarantees
+    # clean starts. So "clips" scope is the default and "full" is opt-in.
     turns: list[tuple[float, float, str]] = []
-    if layout == "split-auto":
-        print("[3b/6] Detecting speaker turns (whole video, chunked)...")
+    scope = os.environ.get("CLIP_TURNS_SCOPE", "clips").lower()
+    if layout == "split-auto" and scope == "full":
+        print("[3b/6] Detecting speaker turns (whole video)...")
         turns_cache = config.WORK_DIR / f"{video_id}.turns.json"
         if turns_cache.exists():
             turns = [tuple(t) for t in json.loads(turns_cache.read_text(encoding="utf-8"))]
@@ -91,9 +102,13 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
             )
 
         swaps = None
-        if layout == "split-auto" and turns:
-            swaps = speakers.swap_intervals(turns, c["start"], c["end"])
-            inside = [t for t in turns if t[1] > c["start"] and t[0] < c["end"]]
+        if layout == "split-auto":
+            # Whole-video turns if we have them, otherwise detect just this
+            # clip's range - 15x less video to decode.
+            segs = turns or speakers.active_speaker_segments(
+                video_path, c["start"], c["end"])
+            swaps = speakers.swap_intervals(segs, c["start"], c["end"])
+            inside = [t for t in segs if t[1] > c["start"] and t[0] < c["end"]]
             c["speaker_switches"] = max(len(inside) - 1, 0)
 
         clip_path = out_dir / f"clip_{n:02d}.mp4"

@@ -84,12 +84,37 @@ def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
     preflight()
     model = _get_model()
 
-    segments, info = model.transcribe(
-        str(audio_path),
-        word_timestamps=True,
-        vad_filter=True,  # skips silence — real speedup on longform
-        vad_parameters={"min_silence_duration_ms": 500},
-    )
+    # Batched inference is ~2.5x faster than sequential on this CPU (measured
+    # same-session on 900s: 153.0s -> 60.3s) and still returns word-level
+    # timestamps, which the scorer needs for cut points.
+    #
+    # It transcribes ~4% fewer words, which does NOT matter now that captions
+    # are off: the transcript is an index, not output. Verified by comparing
+    # selection on both transcripts - the top 3 moments were identical
+    # (including the HYPOCRISY-TRAP clip), all picks carried viral signals in
+    # both, and batched actually produced MORE sentences (222 vs 140), giving
+    # the scorer finer boundaries to cut on.
+    vad = {"min_silence_duration_ms": 500}
+    segments = None
+    if config.BATCH_SIZE > 1:
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            pipeline = BatchedInferencePipeline(model=model)
+            segments, _ = pipeline.transcribe(
+                str(audio_path), batch_size=config.BATCH_SIZE,
+                word_timestamps=True, vad_parameters=vad,
+            )
+        except Exception as e:
+            print(f"  (batched inference unavailable, falling back: {type(e).__name__})")
+            segments = None
+
+    if segments is None:
+        segments, _ = model.transcribe(
+            str(audio_path),
+            word_timestamps=True,
+            vad_filter=True,  # skips silence — real speedup on longform
+            vad_parameters=vad,
+        )
 
     words: list[dict] = []
     for seg in segments:
