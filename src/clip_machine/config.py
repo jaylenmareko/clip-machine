@@ -12,8 +12,10 @@ WORK_DIR = PROJECT_ROOT / "artifacts" / "_work"
 
 # --- transcription (local, faster-whisper) ---
 # tiny.en / base.en / small.en / medium.en — bigger = better + slower.
-# small.en is the sweet spot on a CPU-only machine.
-WHISPER_MODEL = os.environ.get("CLIP_WHISPER_MODEL", "small.en")
+# base.en is the default because this is a 16GB machine that in practice
+# runs with ~2GB free (OneDrive + browsers); small.en gets OOM-killed under
+# that pressure. Bump to small.en via env when the machine is quiet.
+WHISPER_MODEL = os.environ.get("CLIP_WHISPER_MODEL", "base.en")
 WHISPER_THREADS = int(os.environ.get("CLIP_WHISPER_THREADS", "8"))
 
 # --- clip scoring (local, Ollama; falls back to heuristics if absent) ---

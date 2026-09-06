@@ -24,6 +24,48 @@ def extract_audio(video_path: Path) -> Path:
     return audio_path
 
 
+def free_ram_gb() -> float | None:
+    """Free physical RAM in GB, or None if it can't be determined."""
+    try:
+        import ctypes
+
+        class _MemStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = _MemStatus()
+        stat.dwLength = ctypes.sizeof(_MemStatus)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+        return stat.ullAvailPhys / (1024 ** 3)
+    except Exception:
+        return None
+
+
+# Rough working-set needs, measured on this machine.
+_MODEL_RAM_GB = {"tiny.en": 0.6, "base.en": 1.0, "small.en": 2.2, "medium.en": 5.0}
+
+
+def preflight() -> None:
+    """Warn before a long run gets OOM-killed partway through."""
+    free = free_ram_gb()
+    if free is None:
+        return
+    need = _MODEL_RAM_GB.get(config.WHISPER_MODEL, 2.0)
+    if free < need + 0.5:
+        print(f"  ! Only {free:.1f}GB RAM free; {config.WHISPER_MODEL} wants "
+              f"~{need}GB. Close OneDrive/browser tabs, or set "
+              f"CLIP_WHISPER_MODEL=tiny.en, or this may get killed mid-run.")
+
+
 def _get_model():
     global _model
     if _model is None:
@@ -39,6 +81,7 @@ def _get_model():
 def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
     """Return a flat list of {word, start, end} for the whole video."""
     audio_path = extract_audio(video_path)
+    preflight()
     model = _get_model()
 
     segments, info = model.transcribe(
