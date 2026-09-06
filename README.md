@@ -1,6 +1,6 @@
 # Clip Machine
 
-Longform video in → vertical, captioned, clip-ready shorts out. Runs entirely on your machine. No API keys, no subscription, no per-video cost.
+Longform video in → vertical, clip-ready shorts out. Runs entirely on your machine. No API keys, no subscription, no per-video cost.
 
 ## Install
 
@@ -17,12 +17,11 @@ cd projects/business/clip-machine
 python -m clip_machine.pipeline "https://youtube.com/watch?v=..." --max-clips 6
 python -m clip_machine.pipeline "C:/path/to/local/video.mp4"
 python -m clip_machine.pipeline "<source>" --no-llm      # heuristics only, skip Ollama
-python -m clip_machine.pipeline "<source>" --captions    # burn in captions (off by default)
-python -m clip_machine.pipeline "<source>" --layout split-auto --mode debate
+python -m clip_machine.pipeline "<source>" --layout split --mode debate
 ```
 
 Output lands in `artifacts/clips/<video-id>/`:
-- `clip_01.mp4` … — 1080×1920, captions burned in
+- `clip_01.mp4` … — 720×1280 vertical
 - `manifest.json` — start/end, score, hook line, and full transcript per clip
 
 ## Pipeline
@@ -31,9 +30,8 @@ Output lands in `artifacts/clips/<video-id>/`:
 |---|---|---|
 | Download | `yt-dlp` | Skipped if you pass a local file. **Never use `--download-sections` for a deep offset in a long live VOD** — it forces serial ffmpeg streaming from t=0. Grab a direct `https` DASH itag with `-N 8` and slice locally instead |
 | Transcribe | `faster-whisper` (local, CPU) | ~8x realtime at `tiny.en`. Cached to `artifacts/_work/<id>.words.json` |
-| Speaker turns | `speakers.py` (split-auto only) | ~7x realtime, chunked. Cached to `<id>.turns.json` |
 | Score | heuristics + optional Ollama | See below |
-| Cut + reframe (+ captions) | `ffmpeg`, single pass | One encode, 720x1280 |
+| Cut + reframe | `ffmpeg`, single pass | One encode, 720x1280 |
 
 ## Speed
 
@@ -119,7 +117,8 @@ Env vars (or a `.env` in this folder):
 
 | Var | Default | Notes |
 |---|---|---|
-| `CLIP_WHISPER_MODEL` | `small.en` | `base.en` is ~2-3x faster and noticeably sloppier; `medium.en` is better and much slower |
+| `CLIP_WHISPER_MODEL` | `tiny.en` | Transcript is an index, not output — see Models below |
+| `CLIP_BATCH_SIZE` | `8` | Batched inference, ~2.5x faster than sequential |
 | `CLIP_WHISPER_THREADS` | `8` | |
 | `CLIP_MIN_SECONDS` / `CLIP_MAX_SECONDS` | `20` / `150` | Outer bounds, **not a target** — see below |
 | `CLIP_OUT_WIDTH` / `CLIP_OUT_HEIGHT` | `720` / `1280` | 1080 doubles render time for nothing on a 480p source |

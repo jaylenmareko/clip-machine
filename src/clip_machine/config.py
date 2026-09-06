@@ -12,11 +12,10 @@ WORK_DIR = PROJECT_ROOT / "artifacts" / "_work"
 
 # --- transcription (local, faster-whisper) ---
 # tiny.en / base.en / small.en / medium.en — bigger = better + slower.
-# tiny.en is the default now that captions are off. The transcript became an
-# index rather than output: nobody reads the words, so transcription errors
-# ("designists" for Zionists) no longer reach the viewer. It only has to be
-# good enough to locate moments and match scoring phrases. Bump to base.en
-# via env if captions are turned back on - burned-in text is unforgiving.
+# tiny.en. There are no captions, so the transcript is an INDEX, not output:
+# nobody ever reads these words. Transcription errors ("designists" for
+# Zionists) never reach a viewer. The model only has to be good enough to
+# locate moments and match scoring phrases.
 WHISPER_MODEL = os.environ.get("CLIP_WHISPER_MODEL", "tiny.en")
 WHISPER_THREADS = int(os.environ.get("CLIP_WHISPER_THREADS", "8"))
 # Batched inference: ~2.5x faster than sequential on CPU, same word

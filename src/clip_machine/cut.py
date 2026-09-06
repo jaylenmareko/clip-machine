@@ -1,30 +1,26 @@
-"""Cut + reframe (+ optional caption burn) — one ffmpeg pass, one encode.
+"""Cut + reframe — one ffmpeg pass, one encode.
 
-Two passes would double encode time, which matters on a CPU-only machine.
-
-Layouts (measured off the reference channel):
-  center     — single speaker, 9:16 centre crop of the source
-  split      — 50/50 stacked panels, seam at the midpoint
-  split-auto — same, but the active speaker is swapped into the top panel
-               as the turns change (see speakers.py)
+Layouts:
+  center — single speaker, 9:16 centre crop of the source
+  split  — 50/50 stacked panels, seam at the midpoint. Takes the LEFT half
+           of a wide source into the top panel and the RIGHT half into the
+           bottom, which is what a two-person podcast recording needs.
 
 Output size defaults to 720x1280, not 1080x1920. Measured: 1080 costs 2x
-the render time (14.1s vs 7.1s per 30s of split-auto) and buys nothing on a
-480p-ish source, where each panel is already being upscaled. Override with
+the render time (14.1s vs 7.1s per 30s) and buys nothing on a 480p-ish
+source, where each panel is already being upscaled. Override with
 CLIP_OUT_WIDTH / CLIP_OUT_HEIGHT if a genuinely high-res source turns up.
 
-Hardware encoding (h264_qsv) was benchmarked and is NOT used: it came in at
-9.5s vs libx264 veryfast's 10.1s, because the filter graph runs on the CPU
-either way and QSV pays for frame upload/download.
+Hardware encoding (h264_qsv) was benchmarked and is NOT used: 9.5s vs
+libx264 veryfast's 10.1s, because the filter graph runs on the CPU either
+way and QSV pays for frame upload/download.
 """
 import subprocess
 from pathlib import Path
 
 from . import config
 
-_MAX_SWAPS = 60  # keep the enable expression a sane length
-
-LAYOUTS = ("center", "split", "split-auto")
+LAYOUTS = ("center", "split")
 
 
 def _center(w: int, h: int) -> str:
@@ -43,56 +39,22 @@ def _split(w: int, h: int) -> str:
     )
 
 
-def _split_auto(w: int, h: int, enable: str) -> str:
-    hh = h // 2
-    return (
-        f"[0:v]crop=iw/2:ih:0:0,scale={w}:{hh}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{hh},setsar=1,split=2[l1][l2];"
-        f"[0:v]crop=iw/2:ih:iw/2:0,scale={w}:{hh}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{hh},setsar=1,split=2[r1][r2];"
-        f"[l1][r1]vstack=inputs=2[ab];"
-        f"[r2][l2]vstack=inputs=2[ba];"
-        f"[ab][ba]overlay=enable='{enable}'[stacked]"
-    )
-
-
 def render_clip(
     video_path: Path,
     start: float,
     end: float,
-    ass_path: Path | None,
     out_path: Path,
     layout: str = "center",
-    swap_intervals: list[tuple[float, float]] | None = None,
     size: tuple[int, int] | None = None,
 ) -> Path:
-    """Render one clip. `ass_path=None` renders without burned-in captions."""
     w, h = size or (config.OUT_WIDTH, config.OUT_HEIGHT)
     duration = end - start
 
-    # ffmpeg's subtitles filter chokes on Windows drive-letter paths, so when
-    # captions are on we run from the .ass file's directory and reference it
-    # by bare filename.
-    subs = f"subtitles={ass_path.name}" if ass_path else None
-    cwd = str(ass_path.parent) if ass_path else None
-
-    if layout == "split-auto":
-        spans = (swap_intervals or [])[:_MAX_SWAPS]
-        # between() returns 1/0; summing them acts as logical OR. '0' means
-        # never swap, which degrades cleanly to a plain split.
-        enable = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in spans) or "0"
-        graph = _split_auto(w, h, enable)
-    elif layout == "split":
-        graph = _split(w, h)
+    if layout == "split":
+        filter_args = ["-filter_complex", _split(w, h) + ";[stacked]null[v]",
+                       "-map", "[v]", "-map", "0:a?"]
     else:
-        graph = None
-
-    if graph is not None:
-        tail = f";[stacked]{subs}[v]" if subs else ";[stacked]null[v]"
-        filter_args = ["-filter_complex", graph + tail, "-map", "[v]", "-map", "0:a?"]
-    else:
-        vf = _center(w, h) + (f",{subs}" if subs else "")
-        filter_args = ["-vf", vf]
+        filter_args = ["-vf", _center(w, h)]
 
     subprocess.run(
         [
@@ -107,7 +69,6 @@ def render_clip(
             "-movflags", "+faststart",
             str(out_path.resolve()),
         ],
-        cwd=cwd,
         check=True,
         capture_output=True,
     )
