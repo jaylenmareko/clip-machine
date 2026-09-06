@@ -305,7 +305,7 @@ def dedupe(candidates: list[dict], limit: int) -> list[dict]:
     return kept
 
 
-def _rerank_with_ollama(candidates: list[dict], max_clips: int, mode) -> list[dict] | None:
+def _rerank_with_ollama(candidates: list[dict], max_clips: int, mode=None) -> list[dict] | None:
     """Return reordered candidates, or None if Ollama isn't available.
 
     The mode is described to the model too — this is where genuine semantic
@@ -318,14 +318,28 @@ def _rerank_with_ollama(candidates: list[dict], max_clips: int, mode) -> list[di
         f"[{n}] ({c['duration']:.0f}s) {c['text'][:600]}"
         for n, c in enumerate(candidates)
     )
+    # mode is None in auto mode, where we hunt every kind at once.
+    if mode is not None:
+        hunting = (
+            f"You are specifically hunting for: {mode.label} — {mode.blurb}.\n\n"
+            "Every pick must also hook in its first 3 seconds, stand alone with "
+            "zero outside context, and have a clear payoff. Prefer a clip that "
+            f"genuinely matches '{mode.label}' over one that merely uses "
+            "dramatic words.\n\n"
+        )
+    else:
+        hunting = (
+            "Pick the strongest moments of any kind — a hot take, a heated "
+            "exchange, a story, a funny beat, a clear explanation.\n\n"
+            "Every pick must hook in its first 3 seconds, stand alone with zero "
+            "outside context, and have a clear payoff.\n\n"
+        )
+
     prompt = (
         "You are picking short-form video clips from a longform transcript.\n"
-        f"You are specifically hunting for: {mode.label} — {mode.blurb}.\n\n"
-        "Every pick must also hook in its first 3 seconds, stand alone with zero "
-        "outside context, and have a clear payoff. Prefer a clip that genuinely "
-        f"matches '{mode.label}' over one that merely uses dramatic words.\n\n"
-        f"Candidates:\n\n{listing}\n\n"
-        f'Return ONLY JSON: {{"picks": [<up to {max_clips} candidate numbers, best first>]}}'
+        + hunting
+        + f"Candidates:\n\n{listing}\n\n"
+        + f'Return ONLY JSON: {{"picks": [<up to {max_clips} candidate numbers, best first>]}}'
     )
 
     try:
@@ -350,6 +364,44 @@ def _rerank_with_ollama(candidates: list[dict], max_clips: int, mode) -> list[di
     return ordered or None
 
 
+# Scale for the normalised mode match, so it sits in the same range the old
+# per-mode raw bonus did and the other weights stay meaningful.
+_MODE_SCALE = 6.0
+
+# "balanced" is the generic catch-all; it would win the auto comparison on
+# ordinary clips simply by not being specific about anything.
+_AUTO_MODES = [k for k in modes.MODES if k != "balanced"]
+
+
+def best_mode(c: dict, energy=None, median_wps: float = 0.0) -> tuple[float, list[str], str]:
+    """Score a candidate against EVERY mode in one pass and label its type.
+
+    The TYPE is decided on lexical match only, normalised against each mode's
+    own ceiling. Audio is deliberately excluded from that choice: `exciting`
+    carries 4.0 of audio weight, so on loud material (a heated debate is loud
+    throughout) it would win the label on volume alone — measured, it took
+    5 of 6 clips including an obvious hypocrisy-trap moment. Loudness makes
+    any clip more clippable; it does not make it a different KIND of moment.
+    Language does.
+
+    The returned score still includes that mode's audio contribution, so a
+    loud debate clip still outranks a quiet one.
+    """
+    best_norm, best_key = 0.0, "balanced"
+    for key in _AUTO_MODES:
+        mode = modes.get(key)
+        lex, _ = mode.lexical(c["text"])
+        norm = lex / mode.lexicon_cap if mode.lexicon_cap > 0 else 0.0
+        if norm > best_norm:
+            best_norm, best_key = norm, key
+
+    mode = modes.get(best_key)
+    raw, fired = mode_bonus(c, mode, energy=energy, median_wps=median_wps)
+    ceiling = mode.lexicon_cap + mode.w_excite + mode.w_dynamics + mode.w_rate
+    scaled = (raw / ceiling if ceiling > 0 else 0.0) * _MODE_SCALE
+    return scaled, fired, best_key
+
+
 def _median_wps(candidates: list[dict]) -> float:
     """This speaker's typical words-per-second, for relative rate comparison."""
     rates = sorted(len(c["text"].split()) / max(c["duration"], 1) for c in candidates)
@@ -360,12 +412,13 @@ def find_clips(
     words: list[dict],
     max_clips: int = 6,
     use_llm: bool = True,
-    mode_key: str = modes.DEFAULT,
+    mode_key: str = "auto",
     energy=None,
     turn_starts: list[float] | None = None,
 ) -> list[dict]:
     """Pick clips matching `mode_key`, e.g. 'exciting' or 'controversial'."""
-    mode = modes.get(mode_key)
+    auto = (mode_key or "auto").lower() == "auto"
+    mode = None if auto else modes.get(mode_key)
     sentences = build_sentences(words, turn_starts=turn_starts)
     candidates = build_candidates(sentences)
     if not candidates:
@@ -374,11 +427,24 @@ def find_clips(
     median_wps = _median_wps(candidates)
     for c in candidates:
         base = base_quality(c, turn_starts=turn_starts)
-        bonus, fired = mode_bonus(c, mode, energy=energy, median_wps=median_wps)
+        if auto:
+            # One pass hunts every kind of moment; the clip is labelled with
+            # whichever it matched best.
+            bonus, fired, kind = best_mode(c, energy=energy, median_wps=median_wps)
+        else:
+            bonus, fired = mode_bonus(c, mode, energy=energy, median_wps=median_wps)
+            kind = mode.key
         vir, vfired = viral_signals(c)
+        # Confrontational structure IS a debate moment, even when none of the
+        # subject-matter lexicons fired - the HYPOCRISY-TRAP clip was landing
+        # as "balanced" purely because it argues without naming a topic.
+        if auto and kind == "balanced" and (
+                {"accusation", "pinned-down", "HYPOCRISY-TRAP"} & set(vfired)):
+            kind = "debate"
         c["base"] = round(base, 2)
         c["bonus"] = round(bonus, 2)
         c["viral"] = round(vir, 2)
+        c["kind"] = kind
         c["signals"] = fired + vfired
         c["score"] = base + bonus + vir - LENGTH_COST_PER_SEC * c["duration"]
 
@@ -390,5 +456,5 @@ def find_clips(
     for n, c in enumerate(final, 1):
         c["title"] = f"clip_{n:02d}"
         c["hook"] = re.split(r"(?<=[.!?])\s", c["text"].strip())[0][:120]
-        c["mode"] = mode.key
+        c["mode"] = c.get("kind", "balanced")
     return final

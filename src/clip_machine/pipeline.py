@@ -13,7 +13,7 @@ from . import audio_features, config, cut, download, modes, score, transcribe
 
 
 def run(source: str, max_clips: int = 6, use_llm: bool = True,
-        mode: str = modes.DEFAULT, layout: str = "center") -> Path:
+        mode: str = "auto", layout: str = "center") -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -37,7 +37,8 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
     if not words:
         raise SystemExit("No speech found in that video.")
 
-    print(f"[3/6] Reading audio energy (mode: {modes.get(mode).label})...")
+    label = "all types" if mode == "auto" else modes.get(mode).label
+    print(f"[3/6] Reading audio energy (hunting: {label})...")
     energy = audio_features.EnergyProfile(
         audio_features.energy_timeline(transcribe.extract_audio(video_path))
     )
@@ -111,8 +112,8 @@ def main() -> None:
     p.add_argument("--max-clips", type=int, default=6)
     p.add_argument("--no-llm", action="store_true",
                    help="skip the Ollama rerank, use heuristics only")
-    p.add_argument("--mode", default=modes.DEFAULT, choices=list(modes.MODES),
-                   help="what kind of moment to hunt for")
+    p.add_argument("--mode", default="auto", choices=["auto"] + list(modes.MODES),
+                   help="auto hunts every kind at once (default); name one to force it")
     p.add_argument("--layout", default="center", choices=list(cut.LAYOUTS),
                    help="center crop, or 50/50 split-screen for a two-person source")
     args = p.parse_args()

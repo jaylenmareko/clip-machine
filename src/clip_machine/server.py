@@ -50,16 +50,13 @@ class _LogWriter:
         pass
 
 
-def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
-            mode: str, layout: str) -> None:
+def _worker(job: dict, source: str, max_clips: int, use_llm: bool,
+            layout: str) -> None:
     try:
-        if config.WHISPER_MODEL != model:
-            config.WHISPER_MODEL = model
-            transcribe._model = None  # drop the cached model, it's the wrong size
         job["status"] = "running"
         with redirect_stdout(_LogWriter(job)):
             out_dir = pipeline.run(source, max_clips=max_clips, use_llm=use_llm,
-                                   mode=mode, layout=layout)
+                                   layout=layout)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -70,19 +67,19 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
         job["log"].append(f"ERROR  {type(e).__name__}: {e}")
 
 
-def _start_job(source: str, max_clips: int, use_llm: bool, model: str,
-               mode: str, layout: str) -> dict:
+def _start_job(source: str, max_clips: int, use_llm: bool,
+               layout: str) -> dict:
     global _job
     with _job_lock:
         if _job and _job["status"] in ("queued", "running"):
             return {"error": "A job is already running."}
         _job = {
             "status": "queued", "log": [], "clips": [],
-            "source": source, "video_id": None, "error": None, "mode": mode,
+            "source": source, "video_id": None, "error": None,
         }
         threading.Thread(
             target=_worker,
-            args=(_job, source, max_clips, use_llm, model, mode, layout),
+            args=(_job, source, max_clips, use_llm, layout),
             daemon=True,
         ).start()
         return {"ok": True}
@@ -211,8 +208,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             source,
             int(data.get("max_clips", 6)),
             bool(data.get("use_llm", False)),
-            data.get("model") or config.WHISPER_MODEL,
-            data.get("mode") or modes.DEFAULT,
             data.get("layout") or "center",
         )
         self._send_json(result, 409 if "error" in result else 200)
@@ -255,6 +250,8 @@ PAGE = r"""<!doctype html>
   .chip{font-size:10.5px;letter-spacing:.02em;background:#1b2434;border:1px solid var(--line);
     color:#9fb4d8;border-radius:999px;padding:2px 7px}
   .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
+  .kind{background:#26304a;border:1px solid #35406090;color:#a9c0ee;
+    border-radius:5px;padding:1px 7px;font-size:11px;letter-spacing:.03em}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
   button{background:var(--accent);color:#0a1020;border:0;border-radius:8px;
     padding:10px 20px;font:600 14px/1 inherit;cursor:pointer}
@@ -298,32 +295,19 @@ PAGE = r"""<!doctype html>
       <input id="n" type="number" value="6" min="1" max="20">
     </div>
     <div>
-      <label for="model">Whisper model</label>
-      <select id="model">
-        <option value="tiny.en">tiny.en — fastest</option>
-        <option value="base.en" selected>base.en — default</option>
-        <option value="small.en">small.en — best, needs RAM</option>
-      </select>
-    </div>
-  </div>
-  <div class="row" style="margin-top:12px">
-    <div style="grid-column:span 3">
       <label for="layout">Layout</label>
       <select id="layout">
-        <option value="center">Center crop — single speaker</option>
-        <option value="split">Split-screen — two people side by side in source</option>
+        <option value="center">Center crop</option>
+        <option value="split">Split-screen</option>
       </select>
     </div>
   </div>
-  <div class="row-mode">
-    <label>What kind of moment to hunt for</label>
-    <div class="modes" id="modes"></div>
-  </div>
+
   <div class="row2">
     <button id="go">Generate clips</button>
     <label class="check"><input type="checkbox" id="llm"> Ollama rerank (skip if not installed)</label>
   </div>
-  <div class="hint">Transcription is the slow stage and runs on CPU. Transcripts are cached, so re-running the same video is fast.</div>
+  <div class="hint">One pass finds every kind of moment — hot takes, heated exchanges, stories, funny beats — and labels each clip. Transcripts are cached, so re-running the same video is fast.</div>
 </div>
 
 <div class="panel">
@@ -338,19 +322,8 @@ PAGE = r"""<!doctype html>
 <script>
 const $ = id => document.getElementById(id);
 let running = false;
-let mode = 'balanced';
 
-const MODES = __MODES__;
 const AUDIO_SIGNALS = new Set(['loud','animated','fast']);
-
-$('modes').innerHTML = MODES.map(m =>
-  `<div class="mode${m.key===mode?' on':''}" data-k="${m.key}">${m.label}<small>${m.blurb}</small></div>`
-).join('');
-$('modes').onclick = e => {
-  const el = e.target.closest('.mode'); if (!el) return;
-  mode = el.dataset.k;
-  [...$('modes').children].forEach(c => c.classList.toggle('on', c.dataset.k === mode));
-};
 
 $('go').onclick = async () => {
   const source = $('src').value.trim();
@@ -359,8 +332,7 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source, max_clips:+$('n').value, mode,
-                           use_llm:$('llm').checked, model:$('model').value,
+    body: JSON.stringify({ source, max_clips:+$('n').value,
                            layout:$('layout').value })
   });
   const j = await r.json();
@@ -376,7 +348,7 @@ function card(c, vid){
     <div class="meta">
       <p class="hook">${(c.hook||'').replace(/[<>&]/g,'')}</p>
       <div class="stats"><span>${c.duration}s</span><span>@${Math.round(c.start)}s</span>
-        <span>score <b>${c.score}</b></span>${c.mode?`<span>${c.mode}</span>`:''}</div>
+        <span>score <b>${c.score}</b></span>${c.mode?`<span class="kind">${c.mode}</span>`:''}</div>
       ${chips?`<div class="chips">${chips}</div>`:''}
       <details><summary>transcript</summary><p>${(c.transcript||'').replace(/[<>&]/g,'')}</p></details>
     </div></div>`;
@@ -426,12 +398,8 @@ library(); poll();
 
 
 def _render_page() -> str:
-    """Inject the live mode list so the UI never drifts from modes.py."""
-    listing = [
-        {"key": m.key, "label": m.label, "blurb": m.blurb}
-        for m in modes.MODES.values()
-    ]
-    return PAGE.replace("__MODES__", json.dumps(listing))
+    """Render the page."""
+    return PAGE
 
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
