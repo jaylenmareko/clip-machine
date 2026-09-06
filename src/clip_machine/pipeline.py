@@ -12,7 +12,7 @@ from pathlib import Path
 from . import audio_features, config, cut, download, modes, score, transcribe
 
 
-def run(source: str, max_clips: int = 6, use_llm: bool = True,
+def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         mode: str = "auto", layout: str = "center") -> Path:
     t0 = time.time()
 
@@ -43,6 +43,11 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
         audio_features.energy_timeline(transcribe.extract_audio(video_path))
     )
     print(f"      -> {'energy profile ready' if energy.ok else 'no usable audio signal'}")
+
+    if max_clips is None:
+        max_clips = config.auto_clip_count(float(words[-1]["end"]))
+        print(f"      -> pulling up to {max_clips} clips "
+              f"({words[-1]['end']/60:.0f} min of source)")
 
     print(f"[4/6] Scoring clip candidates{' (+ local LLM rerank)' if use_llm else ''}...")
     clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm,
@@ -109,7 +114,8 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
 def main() -> None:
     p = argparse.ArgumentParser(description="Local longform -> vertical clips.")
     p.add_argument("source", help="video URL (yt-dlp) or local file path")
-    p.add_argument("--max-clips", type=int, default=6)
+    p.add_argument("--max-clips", type=int, default=None,
+                   help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
                    help="skip the Ollama rerank, use heuristics only")
     p.add_argument("--mode", default="auto", choices=["auto"] + list(modes.MODES),

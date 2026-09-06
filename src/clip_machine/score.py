@@ -448,7 +448,7 @@ def find_clips(
         c["signals"] = fired + vfired
         c["score"] = base + bonus + vir - LENGTH_COST_PER_SEC * c["duration"]
 
-    shortlist = dedupe(candidates, limit=max(max_clips * 4, 25))
+    shortlist = dedupe(candidates, limit=max(max_clips * 3, 40))
 
     ranked = _rerank_with_ollama(shortlist, max_clips, mode) if use_llm else None
     final = (ranked or shortlist)[:max_clips]

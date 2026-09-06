@@ -50,7 +50,7 @@ class _LogWriter:
         pass
 
 
-def _worker(job: dict, source: str, max_clips: int, use_llm: bool,
+def _worker(job: dict, source: str, max_clips: int | None, use_llm: bool,
             layout: str) -> None:
     try:
         job["status"] = "running"
@@ -67,7 +67,7 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool,
         job["log"].append(f"ERROR  {type(e).__name__}: {e}")
 
 
-def _start_job(source: str, max_clips: int, use_llm: bool,
+def _start_job(source: str, max_clips: int | None, use_llm: bool,
                layout: str) -> dict:
     global _job
     with _job_lock:
@@ -206,7 +206,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         result = _start_job(
             source,
-            int(data.get("max_clips", 6)),
+            data.get("max_clips") or None,
             bool(data.get("use_llm", False)),
             data.get("layout") or "center",
         )
@@ -292,7 +292,7 @@ PAGE = r"""<!doctype html>
     </div>
     <div>
       <label for="n">Max clips</label>
-      <input id="n" type="number" value="6" min="1" max="20">
+      <input id="n" type="number" placeholder="auto" min="1" max="60">
     </div>
     <div>
       <label for="layout">Layout</label>
@@ -332,7 +332,7 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source, max_clips:+$('n').value,
+    body: JSON.stringify({ source, max_clips:$('n').value?+$('n').value:null,
                            layout:$('layout').value })
   });
   const j = await r.json();

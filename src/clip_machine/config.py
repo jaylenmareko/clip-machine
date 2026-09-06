@@ -27,6 +27,27 @@ BATCH_SIZE = int(os.environ.get("CLIP_BATCH_SIZE", "8"))
 OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("CLIP_OLLAMA_MODEL", "llama3.2:3b")
 
+# --- how many clips ---
+# OpusClip produces 15-30 clips from a long video (one reported 25 from a
+# 30-minute upload), and critically it does NOT charge per clip - it bills
+# source length, so there is no reason to be stingy. A fixed 6 was leaving
+# most of a 2-hour stream on the floor.
+#
+# So the count scales with the source: roughly one clip per CLIP_MINUTES_PER
+# minutes, floored and capped. A 15-min video gives 8; a 2-hour stream gives
+# 40. Each clip costs render time (~0.24s per second of output at 720p) and
+# nothing else.
+CLIPS_MIN = int(os.environ.get("CLIP_COUNT_MIN", "8"))
+CLIPS_MAX = int(os.environ.get("CLIP_COUNT_MAX", "40"))
+MINUTES_PER_CLIP = float(os.environ.get("CLIP_MINUTES_PER", "3"))
+
+
+def auto_clip_count(source_seconds: float) -> int:
+    """How many clips to pull from a source of this length."""
+    n = int(source_seconds / 60.0 / MINUTES_PER_CLIP)
+    return max(CLIPS_MIN, min(CLIPS_MAX, n))
+
+
 # --- output ---
 # 720x1280, not 1080x1920. Measured: 1080 doubles render time (14.1s vs
 # 7.1s per 30s of split-auto) and buys nothing when the source is ~480p,
