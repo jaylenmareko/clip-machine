@@ -52,6 +52,60 @@ _CONCRETE = re.compile(r"(\$|\d+%|\d{2,}|one time|the first time|last (year|mont
 _TERMINAL = re.compile(r"[.!?]$")
 
 
+# --------------------------------------------------------------------------
+# Virality: exchange STRUCTURE, not topic.
+#
+# Derived from ~55 real titles across the reference channels. What travels
+# in this format is almost never the subject matter — it's the shape of the
+# exchange. Their single most-used frame is the hypocrisy trap ("X says
+# Saudis should fight for Gaza but he's done nothing"), which needs BOTH a
+# demand made of others AND an excuse made for oneself. That pairing is the
+# highest-weighted signal here, and it can only be scored on a window that
+# contains both halves — which is also why the length cap had to rise.
+# --------------------------------------------------------------------------
+_VIRAL_PATTERNS = [
+    # An opponent conceding something damaging.
+    ("concession", r"\b(i should have|i didn'?t|you'?re right|i'?ll agree with that"
+                   r"|fair enough|that'?s true|i was wrong|my error|unfortunately my)\b", 3.0),
+    # A yes/no demand — creates tension and invites the audience to judge.
+    ("pinned-down", r"\b(yes or no|answer the question|i'?m asking you"
+                    r"|simple question|don'?t dodge|hold it right there"
+                    r"|is that what you just said)\b", 2.5),
+    # Direct accusation, the money line in a debate clip.
+    ("accusation", r"\b(you'?re a (goddamn |damn )?liar|you damn liar|you lying"
+                   r"|you'?re lying|hypocrite|you don'?t even believe)\b", 2.5),
+    # Excuses / evasion — half of the hypocrisy pair.
+    ("evasion", r"\b(no opportunity|stay within the law|nothing i will do is illegal"
+                r"|it'?s very difficult|i have to|i can'?t because)\b", 1.5),
+    # Demands placed on others — the other half.
+    ("demands-others", r"\b(they should|they don'?t defend|they oppress|why don'?t they"
+                       r"|should fight|must protect|they'?re not (real|even))\b", 1.5),
+    # Comment bait — an explicit question to the audience.
+    ("audience-question", r"(agree\?|agree or disagree|what should we do|who'?s right)", 2.0),
+]
+_VIRAL_RE = [(n, re.compile(p, re.IGNORECASE), w) for n, p, w in _VIRAL_PATTERNS]
+
+_VIRAL_CAP = 6.0
+_HYPOCRISY_BONUS = 2.5   # both halves of the trap present in one clip
+
+
+def viral_signals(c: dict) -> tuple[float, list[str]]:
+    """Score how likely this exchange is to travel. Mode-independent."""
+    text = c["text"]
+    total, fired = 0.0, []
+    for name, rx, w in _VIRAL_RE:
+        if rx.search(text):
+            total += w
+            fired.append(name)
+
+    # The hypocrisy trap: demanding of others while excusing yourself.
+    if "evasion" in fired and "demands-others" in fired:
+        total += _HYPOCRISY_BONUS
+        fired.append("HYPOCRISY-TRAP")
+
+    return min(total, _VIRAL_CAP + _HYPOCRISY_BONUS), fired
+
+
 TURN_TOLERANCE = 0.6   # seconds; how close a clip start must be to a turn
 TURN_BONUS = 1.0       # reward for starting where someone starts talking.
                        # Measured: 3.0 outranked actual content (4/5 picks had
@@ -150,12 +204,16 @@ def base_quality(c: dict, turn_starts: list[float] | None = None) -> float:
     if _CONCRETE.search(text):
         score += 1.0
 
-    # Length sweet spot: 30-60s.
+    # Length curve, calibrated to what the reference channel actually
+    # publishes (59-76s). 35-90s is free; past that a clip has to earn its
+    # length with content, because completion rate drives distribution.
     dur = c["duration"]
-    if 30 <= dur <= 60:
+    if 35 <= dur <= 90:
         score += 2.0
-    elif dur < 25 or dur > 80:
-        score -= 1.0
+    elif dur < 25:
+        score -= 1.5
+    elif dur > 90:
+        score -= 1.0 + (dur - 90) / 30.0   # -1 at 90s, -3 at 150s
 
     # Speech density — catch dead air or garbled runs.
     wps = len(text.split()) / max(dur, 1)
@@ -287,10 +345,12 @@ def find_clips(
     for c in candidates:
         base = base_quality(c, turn_starts=turn_starts)
         bonus, fired = mode_bonus(c, mode, energy=energy, median_wps=median_wps)
+        vir, vfired = viral_signals(c)
         c["base"] = round(base, 2)
         c["bonus"] = round(bonus, 2)
-        c["signals"] = fired
-        c["score"] = base + bonus
+        c["viral"] = round(vir, 2)
+        c["signals"] = fired + vfired
+        c["score"] = base + bonus + vir
 
     shortlist = dedupe(candidates, limit=max(max_clips * 4, 25))
 

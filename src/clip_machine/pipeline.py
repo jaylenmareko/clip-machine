@@ -49,9 +49,15 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
     turns: list[tuple[float, float, str]] = []
     if layout == "split-auto":
         print("[3b/6] Detecting speaker turns (whole video, chunked)...")
-        span = float(words[-1]["end"])
-        turns = speakers.active_speaker_segments(video_path, 0.0, span, verbose=True)
-        print(f"      -> {len(turns)} turns detected")
+        turns_cache = config.WORK_DIR / f"{video_id}.turns.json"
+        if turns_cache.exists():
+            turns = [tuple(t) for t in json.loads(turns_cache.read_text(encoding="utf-8"))]
+            print(f"      -> reused cached turns ({len(turns)})")
+        else:
+            span = float(words[-1]["end"])
+            turns = speakers.active_speaker_segments(video_path, 0.0, span, verbose=True)
+            turns_cache.write_text(json.dumps(turns), encoding="utf-8")
+            print(f"      -> {len(turns)} turns detected")
     starts = speakers.turn_starts(turns) if turns else None
 
     print(f"[4/6] Scoring clip candidates{' (+ local LLM rerank)' if use_llm else ''}...")
@@ -94,6 +100,7 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
             "signals": c.get("signals", []),
             "base": c.get("base"),
             "bonus": c.get("bonus"),
+            "viral": c.get("viral"),
             "mode": c.get("mode", mode),
             "speaker_switches": c.get("speaker_switches"),
             "transcript": c["text"],

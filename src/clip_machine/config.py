@@ -23,5 +23,9 @@ OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("CLIP_OLLAMA_MODEL", "llama3.2:3b")
 
 # --- output ---
+# Length: measured the reference channel's own published shorts at 59-76s,
+# so a hard 60s cap is wrong — but so is running to the 3-minute platform
+# limit, since completion rate drives distribution. Allow up to 150s and
+# let base_quality's length curve make long clips earn it.
 CLIP_MIN_SECONDS = float(os.environ.get("CLIP_MIN_SECONDS", "20"))
-CLIP_MAX_SECONDS = float(os.environ.get("CLIP_MAX_SECONDS", "90"))
+CLIP_MAX_SECONDS = float(os.environ.get("CLIP_MAX_SECONDS", "150"))
