@@ -4,7 +4,9 @@
 """
 import argparse
 import json
+import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import (audio_features, caption, config, cut, download, modes, score,
@@ -13,7 +15,7 @@ from . import (audio_features, caption, config, cut, download, modes, score,
 
 def run(source: str, max_clips: int = 6, use_llm: bool = True,
         mode: str = modes.DEFAULT, style: str = caption.DEFAULT_STYLE,
-        layout: str = "center") -> Path:
+        layout: str = "center", captions: bool = False) -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -65,15 +67,28 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
                              mode_key=mode, energy=energy, turn_starts=starts)
     print(f"      -> {len(clips)} clips selected")
 
-    print("[5/6] Rendering vertical clips with burned-in captions...")
-    manifest = []
-    for n, c in enumerate(clips, 1):
+    # Default 1. Parallel rendering was measured on this machine at 186s /
+    # 212s / 157s for 1 / 2 / 3 workers - non-monotonic, i.e. noise rather
+    # than speedup, because libx264 already saturates the CPU and extra
+    # ffmpeg processes just contend. Raise CLIP_RENDER_WORKERS on a machine
+    # with real headroom; here it only adds OOM risk.
+    workers = max(1, int(os.environ.get("CLIP_RENDER_WORKERS", "1")))
+    print(f"[5/6] Rendering {config.OUT_WIDTH}x{config.OUT_HEIGHT} clips"
+          f"{' with captions' if captions else ''}"
+          f"{f' ({workers} in parallel)' if workers > 1 else ''}...")
+
+    def render_one(n: int, c: dict) -> dict:
         is_split = layout in ("split", "split-auto")
-        # Captions straddle the seam on a split, sit in the lower third otherwise.
-        ass_path = caption.build_ass(
-            words, c["start"], c["end"], out_dir / f"clip_{n:02d}.ass",
-            style=style, position="seam" if is_split else "lower",
-        )
+        # Captions are opt-in now. Off by default: they only cost ~13% of
+        # render time, but the burned-in text inherits every transcription
+        # error, which is unfixable after the fact.
+        ass_path = None
+        if captions:
+            # Straddle the seam on a split, lower third otherwise.
+            ass_path = caption.build_ass(
+                words, c["start"], c["end"], out_dir / f"clip_{n:02d}.ass",
+                style=style, position="seam" if is_split else "lower",
+            )
 
         swaps = None
         if layout == "split-auto" and turns:
@@ -84,13 +99,14 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
         clip_path = out_dir / f"clip_{n:02d}.mp4"
         cut.render_clip(video_path, c["start"], c["end"], ass_path, clip_path,
                         layout=layout, swap_intervals=swaps)
-        ass_path.unlink(missing_ok=True)
+        if ass_path:
+            ass_path.unlink(missing_ok=True)
 
         print(f"      -> clip_{n:02d}.mp4  "
               f"({c['duration']:.0f}s @ {c['start']:.0f}s)  "
               f"[{','.join(c.get('signals', [])) or 'no signals'}]  "
               f"\"{c['hook'][:44]}\"")
-        manifest.append({
+        return {
             "file": clip_path.name,
             "start": round(c["start"], 2),
             "end": round(c["end"], 2),
@@ -104,7 +120,21 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
             "mode": c.get("mode", mode),
             "speaker_switches": c.get("speaker_switches"),
             "transcript": c["text"],
-        })
+        }
+
+    # ffmpeg already threads internally, so this is a modest win rather than
+    # linear — measured below. Kept low by default because RAM is the binding
+    # constraint on this machine, not cores.
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(render_one, n, c): n
+                       for n, c in enumerate(clips, 1)}
+            done = {}
+            for f in as_completed(futures):
+                done[futures[f]] = f.result()
+        manifest = [done[n] for n in sorted(done)]
+    else:
+        manifest = [render_one(n, c) for n, c in enumerate(clips, 1)]
 
     print("[6/6] Writing manifest...")
     (out_dir / "manifest.json").write_text(
@@ -129,9 +159,12 @@ def main() -> None:
                    help="caption look")
     p.add_argument("--layout", default="center", choices=list(cut.LAYOUTS),
                    help="center crop, or 50/50 split-screen for a two-person source")
+    p.add_argument("--captions", action="store_true",
+                   help="burn in captions (off by default)")
     args = p.parse_args()
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
-        mode=args.mode, style=args.style, layout=args.layout)
+        mode=args.mode, style=args.style, layout=args.layout,
+        captions=args.captions)
 
 
 if __name__ == "__main__":

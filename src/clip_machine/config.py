@@ -23,9 +23,16 @@ OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("CLIP_OLLAMA_MODEL", "llama3.2:3b")
 
 # --- output ---
-# Length: measured the reference channel's own published shorts at 59-76s,
-# so a hard 60s cap is wrong — but so is running to the 3-minute platform
-# limit, since completion rate drives distribution. Allow up to 150s and
-# let base_quality's length curve make long clips earn it.
+# 720x1280, not 1080x1920. Measured: 1080 doubles render time (14.1s vs
+# 7.1s per 30s of split-auto) and buys nothing when the source is ~480p,
+# since each panel is upscaled either way.
+OUT_WIDTH = int(os.environ.get("CLIP_OUT_WIDTH", "720"))
+OUT_HEIGHT = int(os.environ.get("CLIP_OUT_HEIGHT", "1280"))
+
+# Length: these are OUTER BOUNDS, not a target. Measured 29 of the
+# reference channel's published shorts: 20s to 135s, stdev 29 — they run a
+# clip for as long as its point takes. The 20s floor is exactly their
+# shortest published short. score.LENGTH_COST_PER_SEC handles the rest by
+# making each extra second pay for itself; there is no preferred duration.
 CLIP_MIN_SECONDS = float(os.environ.get("CLIP_MIN_SECONDS", "20"))
 CLIP_MAX_SECONDS = float(os.environ.get("CLIP_MAX_SECONDS", "150"))

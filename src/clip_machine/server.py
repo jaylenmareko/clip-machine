@@ -51,7 +51,7 @@ class _LogWriter:
 
 
 def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
-            mode: str, style: str, layout: str) -> None:
+            mode: str, style: str, layout: str, captions: bool) -> None:
     try:
         if config.WHISPER_MODEL != model:
             config.WHISPER_MODEL = model
@@ -59,7 +59,8 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
         job["status"] = "running"
         with redirect_stdout(_LogWriter(job)):
             out_dir = pipeline.run(source, max_clips=max_clips, use_llm=use_llm,
-                                   mode=mode, style=style, layout=layout)
+                                   mode=mode, style=style, layout=layout,
+                                   captions=captions)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -71,7 +72,7 @@ def _worker(job: dict, source: str, max_clips: int, use_llm: bool, model: str,
 
 
 def _start_job(source: str, max_clips: int, use_llm: bool, model: str,
-               mode: str, style: str, layout: str) -> dict:
+               mode: str, style: str, layout: str, captions: bool) -> dict:
     global _job
     with _job_lock:
         if _job and _job["status"] in ("queued", "running"):
@@ -82,7 +83,8 @@ def _start_job(source: str, max_clips: int, use_llm: bool, model: str,
         }
         threading.Thread(
             target=_worker,
-            args=(_job, source, max_clips, use_llm, model, mode, style, layout),
+            args=(_job, source, max_clips, use_llm, model, mode, style, layout,
+                  captions),
             daemon=True,
         ).start()
         return {"ok": True}
@@ -215,6 +217,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data.get("mode") or modes.DEFAULT,
             data.get("style") or caption.DEFAULT_STYLE,
             data.get("layout") or "center",
+            bool(data.get("captions", False)),
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -328,6 +331,7 @@ PAGE = r"""<!doctype html>
   <div class="row2">
     <button id="go">Generate clips</button>
     <label class="check"><input type="checkbox" id="llm"> Ollama rerank (skip if not installed)</label>
+    <label class="check"><input type="checkbox" id="captions"> Burn in captions</label>
   </div>
   <div class="hint">Transcription is the slow stage and runs on CPU. Transcripts are cached, so re-running the same video is fast.</div>
 </div>
@@ -367,7 +371,8 @@ $('go').onclick = async () => {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ source, max_clips:+$('n').value, mode,
                            use_llm:$('llm').checked, model:$('model').value,
-                           style:$('style').value, layout:$('layout').value })
+                           style:$('style').value, layout:$('layout').value,
+                           captions:$('captions').checked })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }

@@ -17,6 +17,8 @@ cd projects/business/clip-machine
 python -m clip_machine.pipeline "https://youtube.com/watch?v=..." --max-clips 6
 python -m clip_machine.pipeline "C:/path/to/local/video.mp4"
 python -m clip_machine.pipeline "<source>" --no-llm      # heuristics only, skip Ollama
+python -m clip_machine.pipeline "<source>" --captions    # burn in captions (off by default)
+python -m clip_machine.pipeline "<source>" --layout split-auto --mode debate
 ```
 
 Output lands in `artifacts/clips/<video-id>/`:
@@ -27,10 +29,37 @@ Output lands in `artifacts/clips/<video-id>/`:
 
 | Stage | Tool | Notes |
 |---|---|---|
-| Download | `yt-dlp` | Skipped if you pass a local file |
-| Transcribe | `faster-whisper` (local, CPU) | Word-level timestamps. The slow stage — cached to `artifacts/_work/<id>.words.json` |
+| Download | `yt-dlp` | Skipped if you pass a local file. **Never use `--download-sections` for a deep offset in a long live VOD** — it forces serial ffmpeg streaming from t=0. Grab a direct `https` DASH itag with `-N 8` and slice locally instead |
+| Transcribe | `faster-whisper` (local, CPU) | ~8x realtime at `tiny.en`. Cached to `artifacts/_work/<id>.words.json` |
+| Speaker turns | `speakers.py` (split-auto only) | ~7x realtime, chunked. Cached to `<id>.turns.json` |
 | Score | heuristics + optional Ollama | See below |
-| Cut + crop + caption | `ffmpeg`, single pass | 9:16 center crop, one encode |
+| Cut + reframe (+ captions) | `ffmpeg`, single pass | One encode, 720x1280 |
+
+## Speed
+
+Both the transcript and the speaker turns are cached per video, so re-running
+to retune selection skips straight to scoring + render.
+
+Measured on a 15-min two-person source (i5-1235U, no GPU):
+
+| | time |
+|---|---|
+| Transcribe (`tiny.en`, first run) | ~113s |
+| Speaker turns (first run) | ~130s |
+| Audio energy | ~4s |
+| Render 6 clips (~8 min of output) | ~115s |
+| **Re-run with both caches warm** | **~186s** |
+
+What was tried and did NOT help:
+- **`h264_qsv` hardware encoding** — 9.5s vs libx264 veryfast's 10.1s. The
+  filter graph runs on the CPU either way and QSV pays frame upload/download.
+- **Parallel rendering** — 186s / 212s / 157s for 1 / 2 / 3 workers, i.e.
+  non-monotonic noise, because libx264 already saturates the CPU. Default is
+  sequential; raise `CLIP_RENDER_WORKERS` only on a machine with headroom.
+
+What DID help: dropping output from 1080x1920 to **720x1280** (2x faster, and
+the source is ~480p so 1080 was pure upscaling) and turning captions off
+(~13%).
 
 ## Picking WHAT kind of moment (modes)
 
@@ -92,7 +121,9 @@ Env vars (or a `.env` in this folder):
 |---|---|---|
 | `CLIP_WHISPER_MODEL` | `small.en` | `base.en` is ~2-3x faster and noticeably sloppier; `medium.en` is better and much slower |
 | `CLIP_WHISPER_THREADS` | `8` | |
-| `CLIP_MIN_SECONDS` / `CLIP_MAX_SECONDS` | `20` / `90` | Clip length bounds |
+| `CLIP_MIN_SECONDS` / `CLIP_MAX_SECONDS` | `20` / `150` | Outer bounds, **not a target** — see below |
+| `CLIP_OUT_WIDTH` / `CLIP_OUT_HEIGHT` | `720` / `1280` | 1080 doubles render time for nothing on a 480p source |
+| `CLIP_RENDER_WORKERS` | `1` | Parallel renders; no measured win on a CPU-bound machine |
 | `CLIP_OLLAMA_MODEL` | `llama3.2:3b` | |
 
 If clip picks are weak, tune `heuristic_score()` in `src/clip_machine/score.py` — that function is the whole "AI virality score," and it's 40 readable lines.
