@@ -316,7 +316,8 @@ PAGE = r"""<!doctype html>
       <label for="layout">Layout</label>
       <select id="layout">
         <option value="center">Center crop — single speaker</option>
-        <option value="split">Split-screen — two people side by side in source</option>
+        <option value="split">Split-screen — fixed panels</option>
+        <option value="split-auto">Split-screen — auto speaker switching</option>
       </select>
     </div>
   </div>

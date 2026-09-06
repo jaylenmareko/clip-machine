@@ -7,7 +7,8 @@ import json
 import time
 from pathlib import Path
 
-from . import audio_features, caption, config, cut, download, modes, score, transcribe
+from . import (audio_features, caption, config, cut, download, modes, score,
+               speakers, transcribe)
 
 
 def run(source: str, max_clips: int = 6, use_llm: bool = True,
@@ -50,14 +51,22 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
     print("[5/6] Rendering vertical clips with burned-in captions...")
     manifest = []
     for n, c in enumerate(clips, 1):
+        is_split = layout in ("split", "split-auto")
         # Captions straddle the seam on a split, sit in the lower third otherwise.
         ass_path = caption.build_ass(
             words, c["start"], c["end"], out_dir / f"clip_{n:02d}.ass",
-            style=style, position="seam" if layout == "split" else "lower",
+            style=style, position="seam" if is_split else "lower",
         )
+
+        swaps = None
+        if layout == "split-auto":
+            segs = speakers.active_speaker_segments(video_path, c["start"], c["end"])
+            swaps = speakers.swap_intervals(segs, c["start"])
+            c["speaker_switches"] = max(len(segs) - 1, 0)
+
         clip_path = out_dir / f"clip_{n:02d}.mp4"
         cut.render_clip(video_path, c["start"], c["end"], ass_path, clip_path,
-                        layout=layout)
+                        layout=layout, swap_intervals=swaps)
         ass_path.unlink(missing_ok=True)
 
         print(f"      -> clip_{n:02d}.mp4  "
@@ -75,6 +84,7 @@ def run(source: str, max_clips: int = 6, use_llm: bool = True,
             "base": c.get("base"),
             "bonus": c.get("bonus"),
             "mode": c.get("mode", mode),
+            "speaker_switches": c.get("speaker_switches"),
             "transcript": c["text"],
         })
 

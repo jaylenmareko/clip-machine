@@ -25,7 +25,21 @@ _VF_SPLIT = (
     "[top][bot]vstack=inputs=2[stacked]"
 )
 
-LAYOUTS = ("center", "split")
+# Same panels, but built twice so we can swap which half sits on top, then
+# cross-fade between the two stacks with a timeline `enable` expression.
+_VF_SPLIT_AUTO = (
+    "[0:v]crop=iw/2:ih:0:0,scale=1080:960:force_original_aspect_ratio=increase,"
+    "crop=1080:960,setsar=1,split=2[l1][l2];"
+    "[0:v]crop=iw/2:ih:iw/2:0,scale=1080:960:force_original_aspect_ratio=increase,"
+    "crop=1080:960,setsar=1,split=2[r1][r2];"
+    "[l1][r1]vstack=inputs=2[ab];"
+    "[r2][l2]vstack=inputs=2[ba];"
+    "[ab][ba]overlay=enable='{enable}'[stacked]"
+)
+
+_MAX_SWAPS = 60  # keep the enable expression a sane length
+
+LAYOUTS = ("center", "split", "split-auto")
 
 
 def render_clip(
@@ -35,13 +49,22 @@ def render_clip(
     ass_path: Path,
     out_path: Path,
     layout: str = "center",
+    swap_intervals: list[tuple[float, float]] | None = None,
 ) -> Path:
     duration = end - start
     # ffmpeg's subtitles filter chokes on Windows drive-letter paths, so run
     # from the .ass file's own directory and reference it by bare filename.
     subs = f"subtitles={ass_path.name}"
 
-    if layout == "split":
+    if layout == "split-auto":
+        spans = (swap_intervals or [])[:_MAX_SWAPS]
+        # between() returns 1/0; summing them acts as logical OR. '0' means
+        # never swap, which degrades cleanly to a plain split.
+        enable = "+".join(f"between(t,{s:.2f},{e:.2f})" for s, e in spans) or "0"
+        graph = _VF_SPLIT_AUTO.format(enable=enable)
+        filter_args = ["-filter_complex", f"{graph};[stacked]{subs}[v]",
+                       "-map", "[v]", "-map", "0:a?"]
+    elif layout == "split":
         filter_args = ["-filter_complex", f"{_VF_SPLIT};[stacked]{subs}[v]",
                        "-map", "[v]", "-map", "0:a?"]
     else:
