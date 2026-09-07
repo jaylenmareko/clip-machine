@@ -107,8 +107,16 @@ OUT_HEIGHT = int(os.environ.get("CLIP_OUT_HEIGHT", "1280"))
 
 # Length: these are OUTER BOUNDS, not a target. Measured 29 of the
 # reference channel's published shorts: 20s to 135s, stdev 29 — they run a
-# clip for as long as its point takes. The 20s floor is exactly their
-# shortest published short. score.LENGTH_COST_PER_SEC handles the rest by
-# making each extra second pay for itself; there is no preferred duration.
-CLIP_MIN_SECONDS = float(os.environ.get("CLIP_MIN_SECONDS", "20"))
+# clip for as long as its point takes. score.LENGTH_COST_PER_SEC handles the
+# rest by making each extra second pay for itself; there is no preferred
+# duration.
+#
+# The floor was 20s, which was exactly the reference channel's shortest
+# published short - so it was validated against what THEY ship, not against
+# what these clips actually contain. Jaylen reviewed the output: the ~20s
+# clips "don't have the info in them". A 20-second window can carry a line,
+# but rarely a point plus the reasoning that makes it land, which is what
+# these titles now promise. So the floor is what a complete idea needs
+# rather than what somebody else's shortest short happened to be.
+CLIP_MIN_SECONDS = float(os.environ.get("CLIP_MIN_SECONDS", "35"))
 CLIP_MAX_SECONDS = float(os.environ.get("CLIP_MAX_SECONDS", "150"))
