@@ -117,6 +117,28 @@ what they get by watching. A title that only reports that a topic came up
 ("Guest discusses friendship") is a failed title. Name the actual takeaway
 ("Real loyalty takes ten years to prove").
 
+THE PRINCIPLE, NOT THE ANECDOTE
+Most clips make a general point THROUGH a specific story. Title the point.
+The story is how the speaker got there; it is not what the clip is about,
+and a title that only reports the anecdote sounds trivial next to the idea
+it was carrying.
+
+  Clip:  a guest insists a four-star hotel has no laundry room, because
+         "that's what the stars are for - you're paying for what's NOT
+         allowed here", and laundry in the elevator would drag it down to
+         a two-star motel.
+  Weak:  "Why a four-star hotel will never have a laundry room"
+         - true, and it makes a story about towels out of a rule about
+           what luxury actually sells you.
+  Good:  "At a certain price you're paying for what's kept out"
+
+Usually the speaker SAYS the principle in the clip - find that line and
+build the title from it, rather than from the example around it.
+
+A concrete detail can still carry a title when the detail IS the point, or
+as a supporting half after the idea ("Wisdom beats smarts: why Chappelle's
+left turn always wins"). What it must not do is stand in for the idea.
+
 TWO SHAPES - pick whichever fits the clip
   1. THE LESSON.  [the point / rule / hard truth]  -> hashtags
      For teaching, advice, wisdom, an explanation, or a story with a moral.
