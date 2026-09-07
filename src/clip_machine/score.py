@@ -406,6 +406,36 @@ def best_mode(c: dict, energy=None, median_wps: float = 0.0) -> tuple[float, lis
     return scaled, fired, best_key
 
 
+# --------------------------------------------------------------------------
+# Quality floor: return FEWER clips rather than filler.
+#
+# Asking for 8 clips from a 15-minute source scraped the barrel - the run
+# produced "I win." (20s) and a mid-argument line with no signals at all.
+# The rerank prompt tells the model to drop candidates that fail, but it
+# filled the quota instead, so the floor is enforced in code rather than
+# trusted to the model.
+#
+# The observed split was clean. The six good clips scored 6.54-15.12 with
+# 2-5 content signals each; both rejects scored ~2.5 with ZERO. Their only
+# signal was audio, and loudness is intensity, not substance - a clip whose
+# sole evidence is "someone got loud here" has no demonstrated hook.
+# --------------------------------------------------------------------------
+_AUDIO_SIGNALS = {"loud", "animated", "fast"}
+
+# Relative, not absolute: score magnitudes shift with content, so a fixed
+# threshold tuned on one debate would mis-fire elsewhere. 0.35 of the best
+# clip keeps 6.54 against a 15.12 top pick and drops 2.68.
+FLOOR_FRACTION = 0.35
+
+
+def passes_floor(c: dict, top_score: float) -> bool:
+    """Is this clip worth publishing at all, independent of its rank?"""
+    content = [s for s in c.get("signals", []) if s not in _AUDIO_SIGNALS]
+    if not content:
+        return False
+    return c["score"] >= FLOOR_FRACTION * top_score
+
+
 def _median_wps(candidates: list[dict]) -> float:
     """This speaker's typical words-per-second, for relative rate comparison."""
     rates = sorted(len(c["text"].split()) / max(c["duration"], 1) for c in candidates)
@@ -461,7 +491,21 @@ def find_clips(
         ranked = llm.rerank(shortlist, max_clips)
         if ranked is None:
             ranked = _rerank_with_ollama(shortlist, max_clips, mode)
-    final = (ranked or shortlist)[:max_clips]
+    ordered = ranked or shortlist
+
+    # Enforce the floor before truncating, so a weak tail is dropped rather
+    # than padding the count. Returning 6 good clips beats 8 with filler.
+    if ordered:
+        top_score = max(c["score"] for c in ordered)
+        kept = [c for c in ordered if passes_floor(c, top_score)]
+        dropped = len(ordered) - len(kept)
+        if dropped and kept:
+            print(f"      (quality floor dropped {dropped} weak candidate"
+                  f"{'s' if dropped != 1 else ''})")
+        if kept:
+            ordered = kept
+
+    final = ordered[:max_clips]
 
     for n, c in enumerate(final, 1):
         c["title"] = f"clip_{n:02d}"

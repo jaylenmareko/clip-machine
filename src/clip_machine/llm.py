@@ -138,6 +138,9 @@ def rerank(candidates: list[dict], max_clips: int) -> list[dict] | None:
         return [candidates[i] for i in picks]
 
     except Exception as e:
-        print(f"      (Claude rerank unavailable: {type(e).__name__} — "
-              f"keeping heuristic order)")
+        # Include the message - a bare exception name is useless for
+        # diagnosing a 400, and this path is the one that silently degrades.
+        detail = " ".join(str(e).split())[:200]
+        print(f"      (Claude rerank unavailable: {type(e).__name__}: {detail} "
+              f"— keeping heuristic order)")
         return None
