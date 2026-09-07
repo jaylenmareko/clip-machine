@@ -24,8 +24,8 @@ def extract_audio(video_path: Path) -> Path:
     return audio_path
 
 
-def free_ram_gb() -> float | None:
-    """Free physical RAM in GB, or None if it can't be determined."""
+def _mem_status():
+    """Raw GlobalMemoryStatusEx, or None."""
     try:
         import ctypes
 
@@ -45,9 +45,38 @@ def free_ram_gb() -> float | None:
         stat = _MemStatus()
         stat.dwLength = ctypes.sizeof(_MemStatus)
         ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        return stat.ullAvailPhys / (1024 ** 3)
+        return stat
     except Exception:
         return None
+
+
+def free_ram_gb() -> float | None:
+    """Available physical RAM in GB, or None if it can't be determined."""
+    stat = _mem_status()
+    return None if stat is None else stat.ullAvailPhys / (1024 ** 3)
+
+
+def commit_ratio() -> float | None:
+    """Commit charge as a multiple of physical RAM.
+
+    Above 1.0 the OS has promised more memory than it has and is paging to
+    disk to keep the promise. This turned out to be the thing actually
+    capping transcription speed on this machine: a 67-min stream measured
+    5.6x realtime with the CPU at only 71%, and a 10-min slice of the SAME
+    audio later measured 3.59x - slower on a shorter job, which only makes
+    sense if the limit is memory, not compute. Commit was 1.94x physical
+    (30.6GB promised against 15.8GB, 346 processes) and the standby cache
+    was empty, so whisper's weights were being paged in and out rather than
+    staying resident.
+
+    Adding parallel workers to a machine in this state makes it worse, not
+    faster - which is why split_asr stays off until there is real headroom.
+    """
+    stat = _mem_status()
+    if stat is None or not stat.ullTotalPhys:
+        return None
+    charge = stat.ullTotalPageFile - stat.ullAvailPageFile
+    return charge / stat.ullTotalPhys
 
 
 # Rough working-set needs, measured on this machine.
@@ -55,7 +84,7 @@ _MODEL_RAM_GB = {"tiny.en": 0.6, "base.en": 1.0, "small.en": 2.2, "medium.en": 5
 
 
 def preflight() -> None:
-    """Warn before a long run gets OOM-killed partway through."""
+    """Warn before a long run gets OOM-killed or paged into the ground."""
     free = free_ram_gb()
     if free is None:
         return
@@ -64,6 +93,16 @@ def preflight() -> None:
         print(f"  ! Only {free:.1f}GB RAM free; {config.WHISPER_MODEL} wants "
               f"~{need}GB. Close OneDrive/browser tabs, or set "
               f"CLIP_WHISPER_MODEL=tiny.en, or this may get killed mid-run.")
+
+    # Slow is not the same failure as dead, and it used to be invisible: the
+    # run completes, just at half speed, and the only symptom is a wait that
+    # looks like a regression. Say it out loud instead.
+    ratio = commit_ratio()
+    if ratio and ratio > 1.25:
+        print(f"  ! Memory oversubscribed: {ratio:.1f}x physical RAM "
+              f"committed, {free:.1f}GB free. Windows is paging, so expect "
+              f"roughly half speed. Closing browser windows / OneDrive is "
+              f"worth more here than any setting.")
 
 
 def _get_model():

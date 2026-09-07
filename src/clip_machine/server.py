@@ -102,11 +102,17 @@ def _progress(log: list[str]) -> dict:
             applied = line.split("instruction applied:", 1)[1].strip()
         elif "instruction IGNORED:" in line:
             ignored = line.split("instruction IGNORED:", 1)[1].strip()
+    # Lines the pipeline flags with "!" are conditions that change what the
+    # user should expect from this run - memory pressure above all. Buried in
+    # the Details log they explain nothing; a slow run just looks broken.
+    warning = next((l.split("!", 1)[1].strip()
+                    for l in reversed(log) if l.strip().startswith("!")), None)
     cached = any("reused cached transcript" in line for line in log)
     heard_frac = round(heard / source_secs, 4) if source_secs and heard else None
     return {"stage": stage, "step": index, "steps": len(_STAGES),
             "eta_min": eta, "applied": applied, "ignored": ignored,
-            "cached": cached, "source_secs": source_secs or None,
+            "cached": cached, "warning": warning,
+            "source_secs": source_secs or None,
             "heard_secs": round(heard, 1) or None, "heard_frac": heard_frac}
 
 
@@ -152,6 +158,11 @@ def _run_job(job: dict) -> None:
         job["status"] = "error"
         job["error"] = _friendly_error(e, job.get("log", []))
         job["log"].append(f"ERROR  {type(e).__name__}: {e}")
+    finally:
+        # Stop the clock. Without this, elapsed is time.time()-started
+        # forever, so a finished run's duration keeps growing and any ETA or
+        # rate derived from it after the fact is nonsense.
+        job["finished"] = time.time()
 
 
 def _drain_queue() -> None:
@@ -404,7 +415,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "free_ram": round(free, 2) if free else None,
                 "model": config.WHISPER_MODEL,
                 "queued": waiting,
-                "elapsed": round(time.time() - job["started"], 1)
+                "elapsed": round((job.get("finished") or time.time())
+                                 - job["started"], 1)
                            if job.get("started") else 0,
                 **_progress(job.get("log", [])),
             })
@@ -639,6 +651,7 @@ PAGE = r"""<!doctype html>
       <div class="status" id="status"></div>
     </div>
   </div>
+  <div class="notice warn" id="warning" hidden></div>
   <div class="notice" id="applied" hidden></div>
   <div class="notice warn" id="ignored" hidden></div>
   <details id="details"><summary>Details</summary><pre id="log"></pre></details>
@@ -891,6 +904,7 @@ async function poll(){
       if (val){ el.textContent = label + val; el.hidden = false; }
       else { el.hidden = true; }
     };
+    setNote('warning', '', s.warning);
     setNote('applied', 'Applied: ', s.applied);
     setNote('ignored', "Couldn't apply: ", s.ignored);
 
