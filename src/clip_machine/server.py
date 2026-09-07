@@ -206,8 +206,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         result = _start_job(
             source,
-            data.get("max_clips") or None,
-            bool(data.get("use_llm", False)),
+            # Always auto: the count scales with source length in config.
+            None,
+            # Reranking is part of the product now, not an optional extra.
+            # This defaulted to False when the old checkbox was removed, which
+            # silently skipped Claude for every run started from the UI.
+            True,
             data.get("layout") or "center",
         )
         self._send_json(result, 409 if "error" in result else 200)
@@ -291,10 +295,6 @@ PAGE = r"""<!doctype html>
       <input id="src" placeholder="https://youtube.com/watch?v=…  or  C:\path\to\video.mp4">
     </div>
     <div>
-      <label for="n">Max clips</label>
-      <input id="n" type="number" placeholder="auto" min="1" max="60">
-    </div>
-    <div>
       <label for="layout">Layout</label>
       <select id="layout">
         <option value="center">Center crop</option>
@@ -305,14 +305,13 @@ PAGE = r"""<!doctype html>
 
   <div class="row2">
     <button id="go">Generate clips</button>
-    <label class="check"><input type="checkbox" id="llm"> Ollama rerank (skip if not installed)</label>
   </div>
-  <div class="hint">One pass finds every kind of moment — hot takes, heated exchanges, stories, funny beats — and labels each clip. Transcripts are cached, so re-running the same video is fast.</div>
+  <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass.</div>
 </div>
 
-<div class="panel">
-  <div class="status" id="status">Idle</div>
-  <pre id="log">Waiting for a run…</pre>
+<div class="panel" id="runpanel" hidden>
+  <div class="status" id="status"></div>
+  <pre id="log"></pre>
 </div>
 
 <h2>Clips</h2>
@@ -332,8 +331,7 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source, max_clips:$('n').value?+$('n').value:null,
-                           layout:$('layout').value })
+    body: JSON.stringify({ source, layout:$('layout').value })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
@@ -342,11 +340,15 @@ $('go').onclick = async () => {
 function card(c, vid){
   const src = `/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.file)}`;
   const esc = s => (s||'').replace(/[<>&]/g,'');
+  const clock = s => {
+    s = Math.round(s||0);
+    return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
+  };
   return `<div class="clip">
     <video src="${src}" controls preload="metadata"></video>
     <div class="meta">
       <p class="hook">${esc(c.title || c.hook)}</p>
-      <div class="stats"><span>${c.duration}s</span><span>@${Math.round(c.start)}s</span>
+      <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
@@ -373,6 +375,7 @@ async function poll(){
       $('ram').className = 'badge' + (low ? ' warn' : '');
     }
     const st = $('status');
+    if (s.status !== 'idle') $('runpanel').hidden = false;
     if (s.status === 'running' || s.status === 'queued'){
       running = true; $('go').disabled = true;
       st.textContent = 'Running…'; st.className = 'status run';

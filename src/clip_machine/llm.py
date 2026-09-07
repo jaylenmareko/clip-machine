@@ -38,6 +38,15 @@ from . import config  # noqa: F401
 # Swap with CLIP_RERANK_MODEL=claude-sonnet-5 (or claude-opus-5).
 MODEL = os.environ.get("CLIP_RERANK_MODEL", "claude-haiku-4-5")
 EFFORT = os.environ.get("CLIP_RERANK_EFFORT", "medium")
+
+# Titles use a bigger model than ranking, on measurement. Haiku ranks fine -
+# that is judgment over short candidates - but it does not hold the title
+# format: across two runs it left three of six titles with no ALL-CAPS word,
+# used two words in caps on another, and kept writing "Man EXPOSES" instead
+# of the host's name despite an explicit rule. Multi-rule formatting is where
+# the model difference actually shows. The title call is ~2k tokens once per
+# video, so this costs fractions of a cent.
+TITLE_MODEL = os.environ.get("CLIP_TITLE_MODEL", "claude-sonnet-5")
 MAX_CANDIDATE_CHARS = 700
 
 _SYSTEM = """You rank candidate clips cut from a longform video transcript.
@@ -77,11 +86,38 @@ RULES
   FLAMED, BROKE, NEVER, ADMITS, DODGES, TRAITORS, HELL. One. Never two.
 - Optional outcome tease ("and gets FLAMED", "gets EXPOSED") or comment bait
   ("Agree?", "Agree or disagree?", "What should we do?") - use sparingly.
-- 3-6 hashtags, mixing identity tags (#shia #deen #islam #quran #gaza
-  #palestine #foundationalblackamericans) with reach tags (#debate #comedy
-  #redpill #hypocrisy #logic).
+- 3-6 hashtags, and ONLY from the vocabulary below. These are the tags the
+  channels actually use, counted across 120 of their real titles. Do not
+  invent tags, and do not borrow from a topic the clip is not about -
+  #redpill is real but appears only on dating/gender clips, never on a
+  religious or geopolitical one.
+
+  Religion:      #shia #deen #islam #sunni #muslim #nikah #jesus #judaism
+                 #talmud #israelite #holyland #holywar #atheist #kufar
+  Geopolitics:   #gaza #palestine #iran #geopolitics #saudiarabia #uae #uk
+                 #iraq #history #colonialism #activism #maga #news
+  Black America: #foundationalblackamericans #blackgirlmagic #africandiaspora
+                 #blackhistory #blackwomen #blacklove #blackfamily #race
+                 #blackexcellence #blackpower #zulu #capetown #durban
+  Gender/dating: #masculinity #manhood #tradwife #relationships #dating
+                 #datingadvice #divorce #alimony #childsupport #redpill
+                 #hypergamy #femalenature #femaleprivilege #whitewomen
+                 #feminine #femininity #poly #polygamy #patriarchy
+                 #mansrights #pua #player
+  Family:        #family #familyvalues #nuclearfamily #values #parenting
+                 #mothers
+  Reach:         #debate #comedy #logic #philosophy #advice #wordsofwisdom
+                 #crashout #lol #ism #miami #freshandfit
 - 40-95 characters BEFORE the hashtags. Sentence case apart from the caps word.
-- Name the host ("Marquett") only when HE is the actor: "Marquett EXPOSES...".
+- Name the host ("Marquett") whenever HE is the one doing the exposing,
+  asking, or calling out: "Marquett EXPOSES...", "Marquett asks...". Do not
+  write "Man EXPOSES" or "Debater EXPOSES" for the host - that is his own
+  channel, use his name.
+- Vary the tags across a batch and lean on the ones they use most. Frequency
+  across their 120 titles: #shia 17, #foundationalblackamericans 11, #iran
+  10, #deen 10, #palestine 9, #gaza 8, #geopolitics 7, #islam 6, #family 6.
+  #shia is their single most-used tag and belongs on most religious clips.
+  Do not put the same three tags on every clip in a batch.
 - State what actually happens in the clip. Do not invent claims that are not
   in the transcript, and do not exaggerate beyond it.
 
@@ -112,12 +148,19 @@ def title_clips(clips: list[dict]) -> dict[int, str] | None:
 
     try:
         client = anthropic.Anthropic()
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=4096,
-            system=_TITLE_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        kwargs = {
+            "model": TITLE_MODEL,
+            "max_tokens": 4096,
+            "system": _TITLE_SYSTEM,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if not TITLE_MODEL.startswith("claude-haiku"):
+            kwargs["thinking"] = {"type": "adaptive"}
+        try:
+            response = client.messages.create(**kwargs)
+        except TypeError:
+            kwargs.pop("thinking", None)
+            response = client.messages.create(**kwargs)
         if getattr(response, "stop_reason", None) == "refusal":
             print("      (Claude declined to write titles)")
             return None
@@ -148,7 +191,7 @@ def title_clips(clips: list[dict]) -> dict[int, str] | None:
 
         used = getattr(response, "usage", None)
         if used is not None:
-            print(f"      titled by {MODEL} "
+            print(f"      titled by {TITLE_MODEL} "
                   f"({used.input_tokens} in / {used.output_tokens} out)")
         return out or None
 
