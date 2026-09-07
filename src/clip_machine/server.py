@@ -255,6 +255,13 @@ PAGE = r"""<!doctype html>
   .chip{font-size:10.5px;letter-spacing:.02em;background:#1b2434;border:1px solid var(--line);
     color:#9fb4d8;border-radius:999px;padding:2px 7px}
   .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
+  .acts{display:flex;gap:8px;margin-top:10px}
+  .btn{flex:1;text-align:center;background:var(--accent);color:#0a1020;border:0;
+    border-radius:7px;padding:7px 10px;font:600 12px/1.4 inherit;cursor:pointer;
+    text-decoration:none}
+  .btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
+  .btn.ghost:hover{color:var(--text);border-color:#39435a}
+  .btn.ok{background:var(--good);color:#0a1020}
   .kind{background:#26304a;border:1px solid #35406090;color:#a9c0ee;
     border-radius:5px;padding:1px 7px;font-size:11px;letter-spacing:.03em}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
@@ -344,9 +351,24 @@ function card(c, vid){
       <p class="hook">${esc(c.title || c.hook)}</p>
       <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
+      <div class="acts">
+        <a class="btn" href="${src}" download="${esc(c.file)}">Download</a>
+        <button class="btn ghost" data-copy="${encodeURIComponent(c.title||c.hook||'')}">Copy title</button>
+      </div>
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
 }
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button[data-copy]');
+  if (!b) return;
+  try {
+    await navigator.clipboard.writeText(decodeURIComponent(b.dataset.copy));
+    const was = b.textContent;
+    b.textContent = 'Copied'; b.classList.add('ok');
+    setTimeout(() => { b.textContent = was; b.classList.remove('ok'); }, 1200);
+  } catch (err) { b.textContent = 'Copy failed'; }
+});
 
 function render(clips, vid){
   $('clips').innerHTML = clips.map(c => card(c, vid)).join('');
