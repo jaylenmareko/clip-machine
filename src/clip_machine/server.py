@@ -499,6 +499,11 @@ PAGE = r"""<!doctype html>
   .check{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px}
   .check input{width:auto}
   .hint{color:var(--muted);font-size:12px;margin-top:10px}
+  /* Label left, one-line description right, input beneath both. */
+  .labelrow{display:flex;justify-content:space-between;align-items:baseline;
+    gap:20px;flex-wrap:wrap}
+  .labelrow label{margin-bottom:6px}
+  .labelrow .hint{margin:0 0 6px;text-align:right;flex:1 1 260px}
   .notice{font-size:12px;color:var(--good);margin-top:8px;line-height:1.5}
   .notice.warn{color:var(--warn)}
   .ask{margin-top:14px}
@@ -539,9 +544,11 @@ PAGE = r"""<!doctype html>
 <div class="panel">
   <div class="row">
     <div>
-      <label for="src">Video URL or local file path</label>
+      <div class="labelrow">
+        <label for="src">Video URL or local file path</label>
+        <span class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass.</span>
+      </div>
       <input id="src" placeholder="https://youtube.com/watch?v=…  or  C:\path\to\video.mp4">
-      <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass.</div>
     </div>
   </div>
 
