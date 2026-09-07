@@ -449,6 +449,7 @@ def find_clips(
     mode_key: str = "auto",
     energy=None,
     turn_starts: list[float] | None = None,
+    instructions: str | None = None,
 ) -> list[dict]:
     """Pick clips matching `mode_key`, e.g. 'exciting' or 'controversial'."""
     auto = (mode_key or "auto").lower() == "auto"
@@ -488,7 +489,7 @@ def find_clips(
     # step returns None on failure, so selection always completes.
     ranked = None
     if use_llm:
-        ranked = llm.rerank(shortlist, max_clips)
+        ranked = llm.rerank(shortlist, max_clips, instructions=instructions)
         if ranked is None:
             ranked = _rerank_with_ollama(shortlist, max_clips, mode)
     ordered = ranked or shortlist

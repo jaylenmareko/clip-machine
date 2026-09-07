@@ -14,7 +14,8 @@ from . import (audio_features, config, cut, download, layout as layout_detect,
 
 
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
-        mode: str = "auto", layout: str = "auto") -> Path:
+        mode: str = "auto", layout: str = "auto",
+        instructions: str | None = None) -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -69,11 +70,12 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
     print(f"[4/6] Scoring clip candidates{' (+ Claude rerank)' if use_llm else ''}...")
     clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm,
-                             mode_key=mode, energy=energy)
+                             mode_key=mode, energy=energy,
+                             instructions=instructions)
     print(f"      -> {len(clips)} clips selected")
 
     # House-style titles for the final picks; falls back to the hook line.
-    titles = llm.title_clips(clips) or {}
+    titles = llm.title_clips(clips, instructions=instructions) or {}
     for i, c in enumerate(clips):
         c["title_text"] = titles.get(i) or c["hook"]
 
@@ -143,6 +145,8 @@ def main() -> None:
                    help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
                    help="skip Claude reranking, use heuristics only")
+    p.add_argument("--say", default=None, dest="instructions",
+                   help="plain-English steer, e.g. \"only the Gaza parts\"")
     p.add_argument("--mode", default="auto", choices=["auto"] + list(modes.MODES),
                    help="auto hunts every kind at once (default); name one to force it")
     p.add_argument("--layout", default="auto",
@@ -150,7 +154,8 @@ def main() -> None:
                    help="auto detects a side-by-side source (default)")
     args = p.parse_args()
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
-        mode=args.mode, layout=args.layout)
+        mode=args.mode, layout=args.layout,
+        instructions=args.instructions)
 
 
 if __name__ == "__main__":

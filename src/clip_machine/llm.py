@@ -49,6 +49,40 @@ EFFORT = os.environ.get("CLIP_RERANK_EFFORT", "medium")
 TITLE_MODEL = os.environ.get("CLIP_TITLE_MODEL", "claude-sonnet-5")
 MAX_CANDIDATE_CHARS = 700
 
+# What a free-text instruction can actually change. Only two things reach a
+# model in this pipeline - which candidates get picked, and how titles are
+# written - so those are the only things we accept. Anything mechanical (clip
+# length, clip count, layout, captions) is a pipeline parameter no model here
+# can touch, and an instruction quietly half-ignored is worse than a UI that
+# says up front what it handles.
+ACCEPTED_INSTRUCTIONS = [
+    'Topics to include — "only the parts about Gaza"',
+    'Topics to skip — "skip anything about the Talmud"',
+    'Kind of moment — "focus on where he gets challenged", "only funny bits"',
+    'Title style — "no hashtags", "titles under 60 characters", "don\'t use my name"',
+]
+NOT_ACCEPTED = [
+    "clip length or how many clips (both scored automatically)",
+    "layout (detected from the video)",
+    "captions (not generated)",
+    "picking a specific person (no speaker labels yet)",
+]
+
+
+def _instruction_block(instructions: str | None, kind: str) -> str:
+    """Render the user's instruction into a prompt, or return nothing."""
+    text = (instructions or "").strip()
+    if not text:
+        return ""
+    return (
+        "\n\nUSER INSTRUCTION — follow it over your own preference where they "
+        "conflict, but never at the cost of a clip being unusable:\n"
+        f'"{text}"\n'
+        f"It may only affect {kind}. If any part of it asks for something you "
+        "cannot do from here (clip length, how many clips, layout, captions, or "
+        "picking a specific speaker), ignore that part and name it in `ignored`.\n"
+    )
+
 _SYSTEM = """You rank candidate clips cut from a longform video transcript.
 
 You are choosing which moments become standalone short-form videos. Judge each
@@ -128,7 +162,8 @@ use the correct spelling.
 Return ONLY JSON: {"titles": {"<clip number>": "<title with hashtags>", ...}}"""
 
 
-def title_clips(clips: list[dict]) -> dict[int, str] | None:
+def title_clips(clips: list[dict],
+                instructions: str | None = None) -> dict[int, str] | None:
     """Generate a house-style title per clip. Returns {index: title} or None."""
     if not clips:
         return None
@@ -142,8 +177,10 @@ def title_clips(clips: list[dict]) -> dict[int, str] | None:
         for n, c in enumerate(clips)
     )
     prompt = (
-        f"Write one title for each of these {len(clips)} clips.\n\n{listing}\n\n"
-        'Return ONLY JSON: {"titles": {"0": "...", "1": "...", ...}}'
+        f"Write one title for each of these {len(clips)} clips."
+        + _instruction_block(instructions, "how the titles are written")
+        + f"\n\n{listing}\n\n"
+        + 'Return ONLY JSON: {"titles": {"0": "...", "1": "...", ...}}'
     )
 
     try:
@@ -219,7 +256,8 @@ def _extract_picks(text: str, n: int) -> list[int]:
     return [p for p in picks if isinstance(p, int) and 0 <= p < n]
 
 
-def rerank(candidates: list[dict], max_clips: int) -> list[dict] | None:
+def rerank(candidates: list[dict], max_clips: int,
+           instructions: str | None = None) -> list[dict] | None:
     """Return candidates reordered by Claude, or None to keep heuristic order."""
     if not candidates:
         return None
@@ -235,8 +273,12 @@ def rerank(candidates: list[dict], max_clips: int) -> list[dict] | None:
     )
     prompt = (
         f"Rank these {len(candidates)} candidates and return the best "
-        f"{max_clips}, best first.\n\n{listing}\n\n"
-        'Return ONLY JSON, no prose: {"picks": [<candidate numbers, best first>]}'
+        f"{max_clips}, best first."
+        + _instruction_block(instructions, "which clips you choose")
+        + f"\n\n{listing}\n\n"
+        + 'Return ONLY JSON, no prose: {"picks": [<candidate numbers, best '
+          'first>], "applied": "<what you did with the instruction, or empty>", '
+          '"ignored": "<any part you could not act on, or empty>"}'
     )
 
     try:
@@ -270,6 +312,18 @@ def rerank(candidates: list[dict], max_clips: int) -> list[dict] | None:
         text = "".join(
             b.text for b in response.content if getattr(b, "type", None) == "text"
         )
+        # Report what the instruction actually did. A silently half-ignored
+        # instruction is the main way this feature could mislead someone.
+        if instructions:
+            try:
+                note = json.loads(re.search(r"\{.*\}", text, re.DOTALL).group(0))
+                if note.get("applied"):
+                    print(f"      instruction applied: {note['applied']}")
+                if note.get("ignored"):
+                    print(f"      instruction IGNORED: {note['ignored']}")
+            except Exception:
+                pass
+
         picks = _extract_picks(text, len(candidates))
         if not picks:
             print("      (no usable ranking returned — keeping heuristic order)")

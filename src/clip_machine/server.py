@@ -20,7 +20,7 @@ import webbrowser
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import config, cut, modes, pipeline, transcribe
+from . import config, cut, llm, modes, pipeline, transcribe
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -70,16 +70,24 @@ _ETA_RE = re.compile(r"about (\d+) min to process")
 
 
 def _progress(log: list[str]) -> dict:
-    """Derive a friendly stage + ETA from the pipeline's own output."""
+    """Derive a friendly stage, ETA and instruction notices from the output."""
     stage, index = "Starting", 0
     eta = None
+    applied = ignored = None
     for line in log:
         for i, (marker, label) in enumerate(_STAGES):
             if marker in line:
                 stage, index = label, i + 1
         if m := _ETA_RE.search(line):
             eta = int(m.group(1))
-    return {"stage": stage, "step": index, "steps": len(_STAGES), "eta_min": eta}
+        # Surfaced rather than left in the log: the whole point of the
+        # instruction box is knowing what it did and did not do.
+        if "instruction applied:" in line:
+            applied = line.split("instruction applied:", 1)[1].strip()
+        elif "instruction IGNORED:" in line:
+            ignored = line.split("instruction IGNORED:", 1)[1].strip()
+    return {"stage": stage, "step": index, "steps": len(_STAGES),
+            "eta_min": eta, "applied": applied, "ignored": ignored}
 
 
 def _friendly_error(err: Exception, log: list[str]) -> str:
@@ -113,7 +121,8 @@ def _run_job(job: dict) -> None:
         job["status"] = "running"
         with redirect_stdout(_LogWriter(job)):
             out_dir = pipeline.run(job["source"], max_clips=job["max_clips"],
-                                   use_llm=job["use_llm"], layout=job["layout"])
+                                   use_llm=job["use_llm"], layout=job["layout"],
+                                   instructions=job.get("instructions"))
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -142,7 +151,7 @@ def _drain_queue() -> None:
 
 
 def _start_job(source: str, max_clips: int | None, use_llm: bool,
-               layout: str) -> dict:
+               layout: str, instructions: str | None = None) -> dict:
     global _worker_alive
     with _job_lock:
         job = {
@@ -150,6 +159,7 @@ def _start_job(source: str, max_clips: int | None, use_llm: bool,
             "status": "queued", "log": [], "clips": [],
             "source": source, "video_id": None, "error": None,
             "max_clips": max_clips, "use_llm": use_llm, "layout": layout,
+            "instructions": instructions,
         }
         _jobs.append(job)
         position = sum(1 for j in _jobs if j["status"] == "queued")
@@ -416,6 +426,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             True,
             # Detected from the source; the user is not asked.
             data.get("layout") or "auto",
+            (data.get("instructions") or "").strip() or None,
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -488,6 +499,18 @@ PAGE = r"""<!doctype html>
   .check{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:13px}
   .check input{width:auto}
   .hint{color:var(--muted);font-size:12px;margin-top:10px}
+  .notice{font-size:12px;color:var(--good);margin-top:8px;line-height:1.5}
+  .notice.warn{color:var(--warn)}
+  .ask{margin-top:14px}
+  .ask label em{color:var(--muted);font-style:normal;font-weight:400}
+  textarea{width:100%;background:#0f131b;border:1px solid var(--line);
+    color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;resize:vertical}
+  textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+  .can{margin-top:8px;font-size:12px;color:var(--muted);line-height:1.6}
+  .can p{margin:0}
+  .can b{color:#aebbd0;font-weight:600}
+  .can ul{margin:2px 0 6px;padding-left:18px}
+  .can li{margin:1px 0}
   pre{background:#0a0d13;border:1px solid var(--line);border-radius:8px;padding:14px;
     max-height:320px;overflow:auto;font:12px/1.6 ui-monospace,Consolas,monospace;
     color:#c6d0e0;white-space:pre-wrap;margin:0}
@@ -518,18 +541,30 @@ PAGE = r"""<!doctype html>
     <div>
       <label for="src">Video URL or local file path</label>
       <input id="src" placeholder="https://youtube.com/watch?v=…  or  C:\path\to\video.mp4">
+      <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass. Layout is detected from the video.</div>
+    </div>
+  </div>
+
+  <div class="ask">
+    <label for="say">Anything specific? <em>(optional)</em></label>
+    <textarea id="say" rows="2" placeholder="e.g. only the parts about Gaza"></textarea>
+    <div class="can">
+      <p><b>It can act on:</b></p>
+      <ul>__ACCEPTED__</ul>
+      <p><b>It cannot act on:</b> __NOT_ACCEPTED__</p>
     </div>
   </div>
 
   <div class="row2">
     <button id="go">Generate clips</button>
   </div>
-  <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass. Layout is detected from the video.</div>
 </div>
 
 <div class="panel" id="runpanel" hidden>
   <div class="status" id="status"></div>
   <div class="bar"><div class="fill" id="fill"></div></div>
+  <div class="notice" id="applied" hidden></div>
+  <div class="notice warn" id="ignored" hidden></div>
   <details id="details"><summary>Details</summary><pre id="log"></pre></details>
 </div>
 
@@ -593,7 +628,7 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source })
+    body: JSON.stringify({ source, instructions: $('say').value })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
@@ -684,6 +719,14 @@ async function poll(){
       $('details').open = true;
       $('go').disabled = false; running = false;
     }
+    const setNote = (id, label, val) => {
+      const el = $(id);
+      if (val){ el.textContent = label + val; el.hidden = false; }
+      else { el.hidden = true; }
+    };
+    setNote('applied', 'Applied: ', s.applied);
+    setNote('ignored', "Couldn't apply: ", s.ignored);
+
     if (s.log && s.log.length) $('log').textContent = s.log.join('\n');
     const pre = $('log'); if (running) pre.scrollTop = pre.scrollHeight;
   }catch(e){}
@@ -697,7 +740,9 @@ library(); poll();
 
 def _render_page() -> str:
     """Render the page."""
-    return PAGE
+    accepted = "".join(f"<li>{x}</li>" for x in llm.ACCEPTED_INSTRUCTIONS)
+    return (PAGE.replace("__ACCEPTED__", accepted)
+                .replace("__NOT_ACCEPTED__", "; ".join(llm.NOT_ACCEPTED) + "."))
 
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
