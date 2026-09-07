@@ -107,19 +107,37 @@ any of 1-3, even if that means returning fewer than asked."""
 
 # Title formula extracted from ~55 real titles across the reference channels
 # (@TheSaintandTheSinner, @MARQUETTFORWOMEN, @MarquettOnBusiness).
-_TITLE_SYSTEM = """You write titles for short-form debate/podcast clips, in one
-specific house style. Match it exactly.
+_TITLE_SYSTEM = """You write titles for short-form podcast clips in one
+specific house style.
 
-THE FORMULA
-  [group descriptor] + [says / admits / claims / LIES] + [the claim]  -> hashtags
+WHAT A TITLE IS FOR
+The title says WHAT THE CLIP TEACHES - the point made, the lesson to take
+from it, or the claim being argued. Someone scrolling should be able to tell
+what they get by watching. A title that only reports that a topic came up
+("Guest discusses friendship") is a failed title. Name the actual takeaway
+("Real loyalty takes ten years to prove").
 
-RULES
-- Attribute the claim to a DESCRIPTOR, never a personal name: "Muslim says",
-  "Rabbi says", "Privileged white woman says", "Pakistani man says".
-- EXACTLY ONE word in ALL CAPS for emphasis. Pick from: LIES, NOT, EXPOSES,
-  FLAMED, BROKE, NEVER, ADMITS, DODGES, TRAITORS, HELL. One. Never two.
-- Optional outcome tease ("and gets FLAMED", "gets EXPOSED") or comment bait
-  ("Agree?", "Agree or disagree?", "What should we do?") - use sparingly.
+TWO SHAPES - pick whichever fits the clip
+  1. THE LESSON.  [the point / rule / hard truth]  -> hashtags
+     For teaching, advice, wisdom, an explanation, or a story with a moral.
+     This is the DEFAULT - most clips are this.
+  2. THE CONTESTED CLAIM.  [group descriptor] + [says / admits / claims]
+     + [the claim]  -> hashtags
+     ONLY when someone is making an argument another person would dispute.
+     Attribute to a DESCRIPTOR, never a personal name: "Muslim says",
+     "Privileged white woman says". Never force this shape onto a clip that
+     is simply someone explaining something.
+
+CAPS
+- ALL CAPS is for emphasis that EARNS it - a reversal, a denial, a hard
+  number, the one word the whole clip turns on. Most titles need none.
+- Never more than one capitalised word, and never capitalise a word just to
+  satisfy a format. A title with no caps at all is completely fine and is
+  usually the better choice.
+- When it is earned, useful words: NOT, NEVER, LIES, EXPOSES, ADMITS, BROKE,
+  DODGES.
+- Optional outcome tease ("and gets FLAMED") or comment bait ("Agree?") -
+  use sparingly, and only on a contested-claim title.
 - 3-6 hashtags, and ONLY from the vocabulary below. These are the tags the
   channels actually use, counted across 120 of their real titles. Do not
   invent tags, and do not borrow from a topic the clip is not about -
@@ -142,7 +160,7 @@ RULES
                  #mothers
   Reach:         #debate #comedy #logic #philosophy #advice #wordsofwisdom
                  #crashout #lol #ism #miami #freshandfit
-- 40-95 characters BEFORE the hashtags. Sentence case apart from the caps word.
+- 40-95 characters BEFORE the hashtags. Sentence case apart from any caps word.
 - Name the host ("Marquett") whenever HE is the one doing the exposing,
   asking, or calling out: "Marquett EXPOSES...", "Marquett asks...". Do not
   write "Man EXPOSES" or "Debater EXPOSES" for the host - that is his own
@@ -162,6 +180,105 @@ use the correct spelling.
 Return ONLY JSON: {"titles": {"<clip number>": "<title with hashtags>", ...}}"""
 
 
+# One request covering 22 clips came back at 3830 output tokens against a
+# 4096 cap - 266 tokens short of truncation - and on the real run it went
+# over. The truncated JSON failed to parse, title_clips returned None, and
+# ALL 22 clips silently fell back to a raw transcript line as their "title".
+# Nothing raised; the run looked clean. Four defences, because any one of
+# them alone still loses a whole batch:
+#   small batches, a real ceiling, streaming, and a salvage path.
+TITLES_PER_CALL = 8
+_TITLE_MAX_TOKENS = 16000
+
+
+def _salvage_titles(text: str) -> dict:
+    """Pull every "<n>": "<title>" pair present, even mid-truncation.
+
+    A cut-off response still contains most of its titles. Discarding all of
+    them because the closing brace never arrived is the expensive mistake.
+    """
+    pairs = re.findall(r'"(\d+)"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    out = {}
+    for k, v in pairs:
+        try:
+            out[k] = json.loads(f'"{v}"')
+        except Exception:
+            out[k] = v
+    return out
+
+
+def _title_batch(client, clips: list[dict], offset: int,
+                 instructions: str | None) -> tuple[dict[int, str], int, int]:
+    """Title one batch. Returns (titles by GLOBAL index, in_tokens, out)."""
+    listing = "\n\n".join(
+        f"[{offset + n}] ({c['duration']:.0f}s) {c['text'][:900]}"
+        for n, c in enumerate(clips)
+    )
+    numbers = ", ".join(str(offset + n) for n in range(len(clips)))
+    prompt = (
+        f"Write one title for each of these {len(clips)} clips."
+        + _instruction_block(instructions, "how the titles are written")
+        + f"\n\n{listing}\n\n"
+        + f"Return ONLY JSON, with a title for every one of these clip "
+          f"numbers ({numbers}):\n"
+        + '{"titles": {"%d": "...", ...}}' % offset
+    )
+
+    kwargs = {
+        "model": TITLE_MODEL,
+        "max_tokens": _TITLE_MAX_TOKENS,
+        "system": _TITLE_SYSTEM,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if not TITLE_MODEL.startswith("claude-haiku"):
+        kwargs["thinking"] = {"type": "adaptive"}
+
+    # Streamed: with max_tokens this high a blocking request can hit the
+    # request timeout before it finishes generating.
+    try:
+        with client.messages.stream(**kwargs) as stream:
+            response = stream.get_final_message()
+    except TypeError:
+        kwargs.pop("thinking", None)
+        with client.messages.stream(**kwargs) as stream:
+            response = stream.get_final_message()
+
+    if getattr(response, "stop_reason", None) == "refusal":
+        print("      (Claude declined to title one batch)")
+        return {}, 0, 0
+
+    text = "".join(
+        b.text for b in response.content if getattr(b, "type", None) == "text"
+    )
+
+    titles = None
+    try:
+        titles = json.loads(text).get("titles")
+    except Exception:
+        if m := re.search(r"\{.*\}", text, re.DOTALL):
+            try:
+                titles = json.loads(m.group(0)).get("titles")
+            except Exception:
+                titles = None
+    if not isinstance(titles, dict):
+        titles = _salvage_titles(text)
+        if titles:
+            print(f"      (recovered {len(titles)} titles from a truncated reply)")
+
+    lo, hi = offset, offset + len(clips)
+    out: dict[int, str] = {}
+    for k, v in (titles or {}).items():
+        try:
+            idx = int(k)
+        except (TypeError, ValueError):
+            continue
+        if lo <= idx < hi and isinstance(v, str) and v.strip():
+            out[idx] = v.strip()
+
+    used = getattr(response, "usage", None)
+    return out, (used.input_tokens if used else 0), (used.output_tokens if used else 0)
+
+
 def title_clips(clips: list[dict],
                 instructions: str | None = None) -> dict[int, str] | None:
     """Generate a house-style title per clip. Returns {index: title} or None."""
@@ -172,64 +289,29 @@ def title_clips(clips: list[dict],
     except ImportError:
         return None
 
-    listing = "\n\n".join(
-        f"[{n}] ({c['duration']:.0f}s) {c['text'][:900]}"
-        for n, c in enumerate(clips)
-    )
-    prompt = (
-        f"Write one title for each of these {len(clips)} clips."
-        + _instruction_block(instructions, "how the titles are written")
-        + f"\n\n{listing}\n\n"
-        + 'Return ONLY JSON: {"titles": {"0": "...", "1": "...", ...}}'
-    )
-
     try:
         client = anthropic.Anthropic()
-        kwargs = {
-            "model": TITLE_MODEL,
-            "max_tokens": 4096,
-            "system": _TITLE_SYSTEM,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if not TITLE_MODEL.startswith("claude-haiku"):
-            kwargs["thinking"] = {"type": "adaptive"}
-        try:
-            response = client.messages.create(**kwargs)
-        except TypeError:
-            kwargs.pop("thinking", None)
-            response = client.messages.create(**kwargs)
-        if getattr(response, "stop_reason", None) == "refusal":
-            print("      (Claude declined to write titles)")
-            return None
-
-        text = "".join(
-            b.text for b in response.content if getattr(b, "type", None) == "text"
-        )
-        try:
-            data = json.loads(text)
-        except Exception:
-            m = re.search(r"\{.*\}", text, re.DOTALL)
-            if not m:
-                return None
-            data = json.loads(m.group(0))
-
-        titles = data.get("titles") if isinstance(data, dict) else None
-        if not isinstance(titles, dict):
-            return None
-
         out: dict[int, str] = {}
-        for k, v in titles.items():
-            try:
-                idx = int(k)
-            except (TypeError, ValueError):
-                continue
-            if 0 <= idx < len(clips) and isinstance(v, str) and v.strip():
-                out[idx] = v.strip()
+        tin = tout = 0
+        for offset in range(0, len(clips), TITLES_PER_CALL):
+            batch = clips[offset:offset + TITLES_PER_CALL]
+            got, i_tok, o_tok = _title_batch(client, batch, offset, instructions)
+            out.update(got)
+            tin += i_tok
+            tout += o_tok
 
-        used = getattr(response, "usage", None)
-        if used is not None:
-            print(f"      titled by {TITLE_MODEL} "
-                  f"({used.input_tokens} in / {used.output_tokens} out)")
+        calls = (len(clips) + TITLES_PER_CALL - 1) // TITLES_PER_CALL
+        print(f"      titled by {TITLE_MODEL} "
+              f"({len(out)}/{len(clips)} clips, {calls} call"
+              f"{'' if calls == 1 else 's'}, {tin} in / {tout} out)")
+        # Say which clips fell back. A transcript line masquerading as a
+        # title is the exact failure that shipped 22 bad titles unnoticed.
+        missing = [n for n in range(len(clips)) if n not in out]
+        if missing:
+            print(f"      ! no title for clip"
+                  f"{'' if len(missing) == 1 else 's'} "
+                  f"{', '.join(str(m + 1) for m in missing)}; "
+                  f"falling back to a transcript line")
         return out or None
 
     except Exception as e:
