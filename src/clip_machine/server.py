@@ -536,13 +536,20 @@ PAGE = r"""<!doctype html>
   #details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
   #details pre{margin-top:8px}
   .acts{display:flex;gap:8px;margin-top:10px}
+  .desc{margin:0 0 9px;font-size:12.5px;line-height:1.5;color:#a8b6cc}
   .vote{display:flex;gap:8px;margin-top:8px}
   .vote button{flex:1;background:transparent;border:1px solid var(--line);
     color:var(--muted);border-radius:7px;padding:6px;font:600 12px/1.4 inherit;
     cursor:pointer}
   .vote button:hover{color:var(--text);border-color:#39435a}
-  .vote button.on-keep{background:#173226;border-color:#2c4a37;color:var(--good)}
-  .vote button.on-rej{background:#33201f;border-color:#4d2c2b;color:var(--bad)}
+  /* Keep was removed - a clip is kept unless it is rejected, so the button
+     asserted a state that was already the default. Reject is the only verdict
+     now, and it reads red rather than neutral-grey. */
+  .vote button.rej{color:var(--bad);border-color:#4d2c2b}
+  .vote button.rej:hover{background:#2a1a1a;border-color:#6b3a38;color:var(--bad)}
+  .vote button.on-rej{background:var(--bad);border-color:var(--bad);color:#fff;
+    font-weight:600}
+  .vote button.on-rej:hover{background:#c2413f;border-color:#c2413f;color:#fff}
   .clip.rejected{opacity:.42}
   .proj{background:var(--panel);border:1px solid var(--line);border-radius:12px;
     margin-top:14px;overflow:hidden}
@@ -554,7 +561,11 @@ PAGE = r"""<!doctype html>
   .proj[open]>summary::before{transform:rotate(90deg)}
   .proj>summary:hover{background:#181d27}
   .pname{font-weight:600;font-size:13px;word-break:break-all;flex:1 1 auto}
-  .pmeta{color:var(--muted);font-size:12px;white-space:nowrap}
+  .pmeta{display:flex;align-items:center;gap:9px;white-space:nowrap;font-size:12px}
+  .pcount{color:var(--text);font-weight:600}
+  .pdate{color:var(--muted)}
+  .ptime{color:#6c7a90}
+  .pkindx{color:var(--accent)}
   .pbar{display:flex;align-items:center;gap:12px;padding:0 16px 4px}
   .pbar .btn{flex:0 0 auto;padding:7px 14px}
   .pnote{color:var(--muted);font-size:12px}
@@ -694,11 +705,10 @@ document.addEventListener('click', async e => {
     });
     const j = await r.json();
     FEEDBACK[vid] = j.feedback || {};
-    const keepBtn = card.querySelector('[data-vote=keep]');
-    const rejBtn  = card.querySelector('[data-vote=reject]');
+    const rejBtn = card.querySelector('[data-vote=reject]');
     const v = FEEDBACK[vid][file] || '';
-    keepBtn.className = v==='keep' ? 'on-keep' : '';
-    rejBtn.className  = v==='reject' ? 'on-rej' : '';
+    rejBtn.className = v==='reject' ? 'rej on-rej' : 'rej';
+    rejBtn.textContent = v==='reject' ? 'Rejected' : 'Reject';
     card.classList.toggle('rejected', v==='reject');
     updateAllBar(vid);
   } catch (err) {}
@@ -748,23 +758,24 @@ function card(c, vid){
     return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
   };
   const v = (FEEDBACK[vid]||{})[c.file] || '';
-  const t = splitTitle(c.title || c.hook);
+  const full = (c.title || c.hook || '').trim();
+  const t = splitTitle(full);
   return `<div class="clip${v==='reject'?' rejected':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
     <video src="${src}" controls preload="metadata"
       ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
       <p class="hook">${esc(t.text)}</p>
       ${t.tags?`<p class="tags">${esc(t.tags)}</p>`:''}
+      ${c.description?`<p class="desc">${esc(c.description)}</p>`:''}
       <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
       <div class="acts">
         <a class="btn" href="${src}" download="${esc(c.file)}">Download</a>
-        <button class="btn ghost" data-copy="${encodeURIComponent(t.text)}">Copy title</button>
-        ${t.tags?`<button class="btn ghost" data-copy="${encodeURIComponent(t.tags)}">Copy tags</button>`:''}
+        <button class="btn ghost" data-copy="${encodeURIComponent(full)}">Copy title</button>
+        ${c.description?`<button class="btn ghost" data-copy="${encodeURIComponent(c.description)}">Copy description</button>`:''}
       </div>
       <div class="vote">
-        <button data-vote="keep" class="${v==='keep'?'on-keep':''}">Keep</button>
-        <button data-vote="reject" class="${v==='reject'?'on-rej':''}">Reject</button>
+        <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Rejected':'Reject'}</button>
       </div>
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
@@ -789,8 +800,11 @@ function projectFolder(s, open){
     n = Math.round(n||0);
     return `${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;
   };
-  const when = new Date((s.created||0) * 1000).toLocaleString([], {
-    month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+  const d = new Date((s.created||0) * 1000);
+  const when = {
+    date: d.toLocaleDateString([], {month:'short', day:'numeric'}),
+    time: d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}),
+  };
   // A URL is the useful name; a local path is only useful as its filename.
   const src = s.source || '';
   const name = /^https?:/i.test(src) ? src : (src.split(/[\\/]/).pop() || s.video_id);
@@ -799,7 +813,12 @@ function projectFolder(s, open){
   return `<details class="proj" ${open?'open':''}>
     <summary>
       <span class="pname">${esc(name)}</span>
-      <span class="pmeta">${s.count} clip${s.count===1?'':'s'} · ${clock(s.total_seconds)} · ${esc(when)}${s.mode==='compilation'?' · compilation':''}</span>
+      <span class="pmeta">
+        <b class="pcount">${s.count} clip${s.count===1?'':'s'}</b>
+        <span class="pdate">${esc(when.date)}</span>
+        <span class="ptime">${esc(when.time)}</span>
+        ${s.mode==='compilation'?'<span class="pkindx">compilation</span>':''}
+      </span>
     </summary>
     <div class="pbar">
       <a class="btn" href="/zip/${encodeURIComponent(s.video_id)}">Download all</a>

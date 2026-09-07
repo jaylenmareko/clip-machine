@@ -92,9 +92,10 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
                        radius=radius, work_dir=config.WORK_DIR)
         thumb = cut.make_thumbnail(out, out.with_suffix(".jpg"))
 
-        titles = llm.title_clips([{"duration": total,
+        titled = llm.title_clips([{"duration": total,
                                    "text": " ".join(c["text"] for c in segments)}],
-                                 instructions=instructions) or {}
+                                 instructions=instructions)
+        titles, descs = titled if titled else ({}, {})
         manifest = [{
             "file": out.name,
             "thumb": thumb.name if thumb else None,
@@ -103,6 +104,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
             "duration": round(total, 2),
             "score": round(max((c["score"] for c in segments), default=0), 2),
             "title": titles.get(0) or (segments[0]["hook"] if segments else ""),
+            "description": descs.get(0, ""),
             "hook": segments[0]["hook"] if segments else "",
             "signals": sorted({s for c in segments for s in c.get("signals", [])}),
             "mode": "compilation",
@@ -122,9 +124,11 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         return out_dir
 
     # House-style titles for the final picks; falls back to the hook line.
-    titles = llm.title_clips(clips, instructions=instructions) or {}
+    titled = llm.title_clips(clips, instructions=instructions)
+    titles, descs = titled if titled else ({}, {})
     for i, c in enumerate(clips):
         c["title_text"] = titles.get(i) or c["hook"]
+        c["description"] = descs.get(i, "")
 
     # Default 1. Parallel rendering was measured on this machine at 186s /
     # 212s / 157s for 1 / 2 / 3 workers - non-monotonic, i.e. noise rather
@@ -153,6 +157,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
             "duration": round(c["duration"], 2),
             "score": round(c["score"], 2),
             "title": c.get("title_text", c["hook"]),
+            "description": c.get("description", ""),
             "hook": c["hook"],
             "signals": c.get("signals", []),
             "base": c.get("base"),

@@ -216,7 +216,26 @@ Ignore transcription errors - the transcript is a machine index. If a proper
 noun is clearly garbled ("designists" for Zionists, "jibriya" for Jibreel),
 use the correct spelling.
 
-Return ONLY JSON: {"titles": {"<clip number>": "<title with hashtags>", ...}}"""
+THE DESCRIPTION
+Each clip also gets a short description - the caption body that sits under
+the title on an upload. Two or three sentences, 200-320 characters.
+- It must ADD to the title, never restate it. If the title is the takeaway,
+  the description is what happens in the clip that gets you there: the
+  example, the story, the reasoning.
+- Plain sentences. No hashtags (they live in the title), no "In this clip",
+  no "Watch as", no emoji, no calls to action.
+- Same honesty rules as the title: no speaker names, nothing that is not in
+  the transcript.
+
+  Title:       "At a certain price you're paying for what's kept out"
+  Description: "Someone insists a four-star hotel has no laundry room, and
+                gets pushback that every hotel does. The point is what the
+                stars are actually buying - nobody paying $500 a night
+                wants to watch a guest carry laundry through the elevator."
+
+Return ONLY JSON:
+  {"titles":       {"<clip number>": "<title with hashtags>", ...},
+   "descriptions": {"<clip number>": "<2-3 plain sentences>", ...}}"""
 
 
 # One request covering 22 clips came back at 3830 output tokens against a
@@ -230,13 +249,33 @@ TITLES_PER_CALL = 8
 _TITLE_MAX_TOKENS = 16000
 
 
-def _salvage_titles(text: str) -> dict:
-    """Pull every "<n>": "<title>" pair present, even mid-truncation.
+def _salvage_titles(text: str, key: str = "titles") -> dict:
+    """Pull every "<n>": "<string>" pair under `key`, even mid-truncation.
 
-    A cut-off response still contains most of its titles. Discarding all of
+    A cut-off response still contains most of its entries. Discarding all of
     them because the closing brace never arrived is the expensive mistake.
+
+    Scoped to the named object because the reply now carries both titles and
+    descriptions - an unscoped scan would mix the two together and hand a
+    description back as a title.
     """
-    pairs = re.findall(r'"(\d+)"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+    start = text.find(f'"{key}"')
+    if start < 0:
+        return {}
+    brace = text.find("{", start)
+    if brace < 0:
+        return {}
+    # To the matching close, or to end-of-text when it was cut off.
+    depth, stop = 0, len(text)
+    for i in range(brace, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                stop = i + 1
+                break
+    pairs = re.findall(r'"(\d+)"\s*:\s*"((?:[^"\\]|\\.)*)"', text[brace:stop])
     out = {}
     for k, v in pairs:
         try:
@@ -247,20 +286,23 @@ def _salvage_titles(text: str) -> dict:
 
 
 def _title_batch(client, clips: list[dict], offset: int,
-                 instructions: str | None) -> tuple[dict[int, str], int, int]:
-    """Title one batch. Returns (titles by GLOBAL index, in_tokens, out)."""
+                 instructions: str | None
+                 ) -> tuple[dict[int, str], dict[int, str], int, int]:
+    """Title one batch. Returns (titles, descriptions, in_tokens, out)."""
     listing = "\n\n".join(
         f"[{offset + n}] ({c['duration']:.0f}s) {c['text'][:900]}"
         for n, c in enumerate(clips)
     )
     numbers = ", ".join(str(offset + n) for n in range(len(clips)))
     prompt = (
-        f"Write one title for each of these {len(clips)} clips."
+        f"Write one title and one description for each of these "
+        f"{len(clips)} clips."
         + _instruction_block(instructions, "how the titles are written")
         + f"\n\n{listing}\n\n"
-        + f"Return ONLY JSON, with a title for every one of these clip "
-          f"numbers ({numbers}):\n"
-        + '{"titles": {"%d": "...", ...}}' % offset
+        + f"Return ONLY JSON, with a title AND a description for every one "
+          f"of these clip numbers ({numbers}):\n"
+        + ('{"titles": {"%d": "..."}, "descriptions": {"%d": "..."}}'
+           % (offset, offset))
     )
 
     kwargs = {
@@ -284,43 +326,58 @@ def _title_batch(client, clips: list[dict], offset: int,
 
     if getattr(response, "stop_reason", None) == "refusal":
         print("      (Claude declined to title one batch)")
-        return {}, 0, 0
+        return {}, {}, 0, 0
 
     text = "".join(
         b.text for b in response.content if getattr(b, "type", None) == "text"
     )
 
-    titles = None
+    data = None
     try:
-        titles = json.loads(text).get("titles")
+        data = json.loads(text)
     except Exception:
         if m := re.search(r"\{.*\}", text, re.DOTALL):
             try:
-                titles = json.loads(m.group(0)).get("titles")
+                data = json.loads(m.group(0))
             except Exception:
-                titles = None
+                data = None
+
+    titles = (data or {}).get("titles")
+    descs = (data or {}).get("descriptions")
     if not isinstance(titles, dict):
-        titles = _salvage_titles(text)
+        titles = _salvage_titles(text, "titles")
         if titles:
             print(f"      (recovered {len(titles)} titles from a truncated reply)")
+    if not isinstance(descs, dict):
+        descs = _salvage_titles(text, "descriptions")
 
     lo, hi = offset, offset + len(clips)
-    out: dict[int, str] = {}
-    for k, v in (titles or {}).items():
-        try:
-            idx = int(k)
-        except (TypeError, ValueError):
-            continue
-        if lo <= idx < hi and isinstance(v, str) and v.strip():
-            out[idx] = v.strip()
+
+    def collect(src) -> dict[int, str]:
+        got: dict[int, str] = {}
+        for k, v in (src or {}).items():
+            try:
+                idx = int(k)
+            except (TypeError, ValueError):
+                continue
+            if lo <= idx < hi and isinstance(v, str) and v.strip():
+                got[idx] = v.strip()
+        return got
 
     used = getattr(response, "usage", None)
-    return out, (used.input_tokens if used else 0), (used.output_tokens if used else 0)
+    return (collect(titles), collect(descs),
+            used.input_tokens if used else 0,
+            used.output_tokens if used else 0)
 
 
-def title_clips(clips: list[dict],
-                instructions: str | None = None) -> dict[int, str] | None:
-    """Generate a house-style title per clip. Returns {index: title} or None."""
+def title_clips(clips: list[dict], instructions: str | None = None
+                ) -> tuple[dict[int, str], dict[int, str]] | None:
+    """Title and describe each clip.
+
+    Returns ({index: title}, {index: description}) or None. Both come from
+    one call per batch - the model needs the clip in front of it either way,
+    and a second pass would double the cost to re-read the same transcript.
+    """
     if not clips:
         return None
     try:
@@ -331,18 +388,22 @@ def title_clips(clips: list[dict],
     try:
         client = anthropic.Anthropic()
         out: dict[int, str] = {}
+        descs: dict[int, str] = {}
         tin = tout = 0
         for offset in range(0, len(clips), TITLES_PER_CALL):
             batch = clips[offset:offset + TITLES_PER_CALL]
-            got, i_tok, o_tok = _title_batch(client, batch, offset, instructions)
+            got, gotd, i_tok, o_tok = _title_batch(client, batch, offset,
+                                                   instructions)
             out.update(got)
+            descs.update(gotd)
             tin += i_tok
             tout += o_tok
 
         calls = (len(clips) + TITLES_PER_CALL - 1) // TITLES_PER_CALL
         print(f"      titled by {TITLE_MODEL} "
-              f"({len(out)}/{len(clips)} clips, {calls} call"
-              f"{'' if calls == 1 else 's'}, {tin} in / {tout} out)")
+              f"({len(out)}/{len(clips)} titles, {len(descs)}/{len(clips)} "
+              f"descriptions, {calls} call{'' if calls == 1 else 's'}, "
+              f"{tin} in / {tout} out)")
         # Say which clips fell back. A transcript line masquerading as a
         # title is the exact failure that shipped 22 bad titles unnoticed.
         missing = [n for n in range(len(clips)) if n not in out]
@@ -351,7 +412,12 @@ def title_clips(clips: list[dict],
                   f"{'' if len(missing) == 1 else 's'} "
                   f"{', '.join(str(m + 1) for m in missing)}; "
                   f"falling back to a transcript line")
-        return out or None
+        nodesc = [n for n in range(len(clips)) if n not in descs]
+        if nodesc:
+            print(f"      ! no description for clip"
+                  f"{'' if len(nodesc) == 1 else 's'} "
+                  f"{', '.join(str(m + 1) for m in nodesc)}")
+        return (out, descs) if out else None
 
     except Exception as e:
         detail = " ".join(str(e).split())[:200]
