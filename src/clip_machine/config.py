@@ -6,6 +6,28 @@ model choices. Nothing here needs a paid service.
 import os
 from pathlib import Path
 
+# Secrets live OUTSIDE the repo and outside OneDrive - the school tenant syncs
+# .env files, so nothing sensitive goes in the project tree.
+_ENV_FILE = Path.home() / ".config" / "clip-machine" / ".env"
+
+
+def _load_env_file() -> None:
+    """Minimal .env loader. Real environment variables always win."""
+    if not _ENV_FILE.exists():
+        return
+    try:
+        for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+    except Exception:
+        pass
+
+
+_load_env_file()
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CLIPS_DIR = PROJECT_ROOT / "artifacts" / "clips"
 WORK_DIR = PROJECT_ROOT / "artifacts" / "_work"

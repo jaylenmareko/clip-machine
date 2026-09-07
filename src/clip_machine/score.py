@@ -11,14 +11,18 @@ Selection runs in two stages, because feeding a whole transcript to a
 CPU-bound LLM is not viable on a GPU-less machine:
 
   1. Heuristic prefilter over every candidate window (cheap, instant).
-  2. Optional rerank of the ~25 survivors by a local Ollama model, which
-     only ever sees short candidate text. If Ollama isn't running, the
-     heuristic ranking stands on its own and the pipeline still works.
+     Decides whether a clip is USABLE - clean start, clean end, sane length.
+  2. Claude reranks the survivors (see llm.py). Decides whether a clip is
+     GOOD - does it hook, does it stand alone, does it pay off. It only ever
+     sees the shortlist, never the full transcript, and it reorders rather
+     than re-cuts, so it cannot produce a broken clip.
+     Falls back to a local Ollama model, then to the heuristic order, so
+     selection never depends on the API being reachable.
 """
 import json
 import re
 
-from . import config, modes
+from . import config, llm, modes
 
 # Openers that prove the clip depends on earlier context.
 # The bare replies ("no", "yes", "okay"...) were added after a real debate
@@ -450,7 +454,13 @@ def find_clips(
 
     shortlist = dedupe(candidates, limit=max(max_clips * 3, 40))
 
-    ranked = _rerank_with_ollama(shortlist, max_clips, mode) if use_llm else None
+    # Claude first (real judgment), then local Ollama, then heuristics. Each
+    # step returns None on failure, so selection always completes.
+    ranked = None
+    if use_llm:
+        ranked = llm.rerank(shortlist, max_clips)
+        if ranked is None:
+            ranked = _rerank_with_ollama(shortlist, max_clips, mode)
     final = (ranked or shortlist)[:max_clips]
 
     for n, c in enumerate(final, 1):
