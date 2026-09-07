@@ -146,10 +146,22 @@ def _run_job(job: dict) -> None:
     try:
         job["status"] = "running"
         job["started"] = time.time()
+        def on_clip(rec, done, total, video_id):
+            # Clips land in /api/status the moment each one finishes, so the
+            # page can show results while the rest are still rendering
+            # instead of holding everything back to the final second.
+            # video_id has to be set here too: /clips/<id>/<file> is how the
+            # page fetches them, and it was previously only known once the
+            # whole run finished.
+            job["video_id"] = video_id
+            job["clips"].append(rec)
+            job["made"], job["to_make"] = done, total
+
         with redirect_stdout(_LogWriter(job)):
             out_dir = pipeline.run(job["source"], max_clips=job["max_clips"],
                                    use_llm=job["use_llm"], layout=job["layout"],
-                                   instructions=job.get("instructions"))
+                                   instructions=job.get("instructions"),
+                                   on_clip=on_clip)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8-sig"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -460,6 +472,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "free_ram": round(free, 2) if free else None,
                 "model": config.WHISPER_MODEL,
                 "queued": waiting,
+                "made": job.get("made", 0),
+                "to_make": job.get("to_make", 0),
                 "elapsed": round((job.get("finished") or time.time())
                                  - job["started"], 1)
                            if job.get("started") else 0,
@@ -760,6 +774,7 @@ PAGE = r"""<!doctype html>
   <div class="notice" id="applied" hidden></div>
   <div class="notice warn" id="ignored" hidden></div>
   <details id="details"><summary>Details</summary><pre id="log"></pre></details>
+  <div class="grid" id="livegrid"></div>
 </div>
 
 <h2>Library</h2>
@@ -1033,6 +1048,13 @@ function ringPct(s){
     return (before + band * Math.min(1, s.heard_frac)) / total;
   }
 
+  // Rendering reports real progress too, now that clips publish one by one:
+  // made/to_make is an exact fraction, so the biggest remaining band stops
+  // being a guess as well.
+  if (step === 7 && s.to_make){
+    return (before + band * Math.min(1, (s.made || 0) / s.to_make)) / total;
+  }
+
   // Every other stage: ease across its own band on elapsed time. Expected
   // duration comes from the pipeline's ETA, split by this stage's weight.
   const runSecs = (s.eta_min ? s.eta_min * 60 : 300);
@@ -1068,6 +1090,31 @@ function paintRing(frac, label, state){
     (state === 'done' ? ' done' : state === 'err' ? ' err' : '');
 }
 
+// Clips appear as they finish rendering rather than all at once at the end.
+// APPEND ONLY - rewriting the grid's innerHTML each second would restart any
+// video the user had started playing and throw away their scroll position,
+// which is worse than the wait it replaces.
+let liveShown = 0, liveVid = null;
+
+function liveClips(s){
+  const grid = $('livegrid');
+  const clips = s.clips || [];
+  if (s.status !== 'running' || !clips.length){
+    // The finished run is rendered by the library below, so the live grid
+    // clears out rather than showing every clip twice.
+    if (s.status !== 'running' && liveShown){ grid.innerHTML = ''; liveShown = 0; }
+    return;
+  }
+  if (s.video_id !== liveVid){ grid.innerHTML = ''; liveShown = 0; liveVid = s.video_id; }
+  // A clip's own directory is not known until the manifest lands, so during
+  // the run the files are served from the job's video_id.
+  const vid = s.video_id || liveVid;
+  for (let i = liveShown; i < clips.length; i++){
+    grid.insertAdjacentHTML('beforeend', card(clips[i], vid));
+  }
+  liveShown = clips.length;
+}
+
 async function poll(){
   try{
     const s = await (await fetch('/api/status')).json();
@@ -1083,7 +1130,9 @@ async function poll(){
       const frac = ringPct(s);
       const q = s.queued ? ` · ${s.queued} more queued` : '';
       const hd = (s.step === 3 && s.heard_secs)
-        ? ` · ${mmss(Math.round(s.heard_secs))} of ${mmss(Math.round(s.source_secs||0))} heard` : '';
+        ? ` · ${mmss(Math.round(s.heard_secs))} of ${mmss(Math.round(s.source_secs||0))} heard`
+        : (s.step === 7 && s.to_make)
+        ? ` · ${s.made||0} of ${s.to_make} clips ready` : '';
       paintRing(frac, (s.stage || 'Starting') + '…' + etaText(s, frac) + hd + q, 'run');
     } else if (s.status === 'done'){
       paintRing(1, `Done — ${s.clips.length} clip${s.clips.length===1?'':'s'} ready`, 'done');
@@ -1107,6 +1156,7 @@ async function poll(){
 
     if (s.log && s.log.length) $('log').textContent = s.log.join('\n');
     const pre = $('log'); if (running) pre.scrollTop = pre.scrollHeight;
+    liveClips(s);
   }catch(e){ console.error('poll', e); }   // silent here once killed the
   setTimeout(poll, 1000);  // whole UI after a removed element left a dead ref
 

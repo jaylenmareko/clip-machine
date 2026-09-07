@@ -5,6 +5,7 @@
 import argparse
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -18,7 +19,16 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         mode: str = "auto", layout: str = "auto",
         instructions: str | None = None,
         look: str | None = None, radius: int | None = None,
-        compile_to: float | None = None) -> Path:
+        compile_to: float | None = None,
+        on_clip=None) -> Path:
+    """Longform in, vertical clips out.
+
+    `on_clip(record, done, total, video_id)` is called as each clip finishes
+    rendering, so a caller can show results while the rest are still being
+    made. On a 67-minute source the old behaviour was 25 minutes of blank
+    progress bar followed by 15 clips at once; the render stage is the last
+    ~6 minutes of that, and there is no reason to sit on it.
+    """
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -140,6 +150,33 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
           f" [{look or config.LOOK}]"
           f"{f' ({workers} in parallel)' if workers > 1 else ''}...")
 
+    total = len(clips)
+    finished = 0
+    manifest_lock = threading.Lock()
+
+    def publish(rec: dict) -> None:
+        """Hand a finished clip to the caller and persist progress.
+
+        The manifest is rewritten after every clip, not once at the end, so
+        a run killed partway through (OOM has done it six times on this
+        machine) leaves the clips it did finish usable instead of a
+        directory of orphaned mp4s with no titles.
+        """
+        nonlocal finished
+        with manifest_lock:
+            done_records.append(rec)
+            finished += 1
+            ordered = sorted(done_records, key=lambda r: r["file"])
+            (out_dir / "manifest.json").write_text(
+                json.dumps({"source": source, "video_id": video_id,
+                            "mode": mode, "partial": finished < total,
+                            "clips": ordered}, indent=2),
+                encoding="utf-8")
+            if on_clip:
+                on_clip(rec, finished, total, video_id)
+
+    done_records: list[dict] = []
+
     def render_one(n: int, c: dict) -> dict:
         clip_path = out_dir / f"clip_{n:02d}.mp4"
         cut.render_clip(video_path, c["start"], c["end"], clip_path,
@@ -167,21 +204,27 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
             "transcript": c["text"],
         }
 
+    def render_and_publish(n: int, c: dict) -> dict:
+        rec = render_one(n, c)
+        publish(rec)
+        return rec
+
     # ffmpeg already threads internally, so this is a modest win rather than
     # linear — measured below. Kept low by default because RAM is the binding
     # constraint on this machine, not cores.
     if workers > 1:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = {ex.submit(render_one, n, c): n
+            futures = {ex.submit(render_and_publish, n, c): n
                        for n, c in enumerate(clips, 1)}
             done = {}
             for f in as_completed(futures):
                 done[futures[f]] = f.result()
         manifest = [done[n] for n in sorted(done)]
     else:
-        manifest = [render_one(n, c) for n, c in enumerate(clips, 1)]
+        manifest = [render_and_publish(n, c) for n, c in enumerate(clips, 1)]
 
     print("[6/6] Writing manifest...")
+    # Final write: same content, minus the `partial` flag.
     (out_dir / "manifest.json").write_text(
         json.dumps({"source": source, "video_id": video_id, "mode": mode,
                     "clips": manifest}, indent=2),
