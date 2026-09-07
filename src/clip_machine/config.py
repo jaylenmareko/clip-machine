@@ -30,7 +30,16 @@ _load_env_file()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CLIPS_DIR = PROJECT_ROOT / "artifacts" / "clips"
-WORK_DIR = PROJECT_ROOT / "artifacts" / "_work"
+
+# Scratch lives OUTSIDE OneDrive. This used to be artifacts/_work, inside the
+# synced tree, which meant every run handed OneDrive a 1GB source mp4 and a
+# 130MB wav to upload to the school tenant WHILE whisper was reading them.
+# 1.3GB of throwaway files were being backed up. Finished clips still land in
+# artifacts/clips - those are the deliverable and worth syncing.
+WORK_DIR = Path(os.environ.get(
+    "CLIP_WORK_DIR",
+    Path(os.environ.get("LOCALAPPDATA", Path.home() / ".cache")) / "clip-machine" / "work",
+))
 
 # --- transcription (local, faster-whisper) ---
 # tiny.en / base.en / small.en / medium.en — bigger = better + slower.

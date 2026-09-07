@@ -68,6 +68,12 @@ _STAGES = [
     ("[6/6]", "Finishing up"),
 ]
 _ETA_RE = re.compile(r"about (\d+) min to process")
+_SOURCE_RE = re.compile(r"-> (\d+) min of source")
+# Transcription prints one line per segment, stamped with where it is in the
+# source: "  [  791.8s] So let me just get into it...". That is REAL progress
+# through the slow stage - better than any easing curve - and dividing it by
+# wall time gives a measured rate the static ETA can be corrected against.
+_SEG_RE = re.compile(r"^\s*\[\s*([\d.]+)s\]")
 
 
 def _progress(log: list[str]) -> dict:
@@ -75,6 +81,8 @@ def _progress(log: list[str]) -> dict:
     stage, index = "Starting", 0
     eta = None
     applied = ignored = None
+    source_secs = 0.0
+    heard = 0.0
     for line in log:
         for i, (marker, label) in enumerate(_STAGES):
             # Never go backwards: compile mode logs "titled by" AFTER [5/6],
@@ -84,6 +92,10 @@ def _progress(log: list[str]) -> dict:
                 stage, index = label, i + 1
         if m := _ETA_RE.search(line):
             eta = int(m.group(1))
+        if m := _SOURCE_RE.search(line):
+            source_secs = int(m.group(1)) * 60.0
+        if m := _SEG_RE.match(line):
+            heard = max(heard, float(m.group(1)))
         # Surfaced rather than left in the log: the whole point of the
         # instruction box is knowing what it did and did not do.
         if "instruction applied:" in line:
@@ -91,9 +103,11 @@ def _progress(log: list[str]) -> dict:
         elif "instruction IGNORED:" in line:
             ignored = line.split("instruction IGNORED:", 1)[1].strip()
     cached = any("reused cached transcript" in line for line in log)
+    heard_frac = round(heard / source_secs, 4) if source_secs and heard else None
     return {"stage": stage, "step": index, "steps": len(_STAGES),
             "eta_min": eta, "applied": applied, "ignored": ignored,
-            "cached": cached}
+            "cached": cached, "source_secs": source_secs or None,
+            "heard_secs": round(heard, 1) or None, "heard_frac": heard_frac}
 
 
 def _friendly_error(err: Exception, log: list[str]) -> str:
@@ -785,6 +799,11 @@ const WEIGHTS = [15, 2, 40, 6, 12, 5, 35, 1];   // parallel to _STAGES
 const CIRC = 326.7;                             // 2*pi*52, matches the CSS
 let stageAt = 0, stageWas = -1;
 
+function mmss(n){
+  n = Math.round(n || 0);
+  return `${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;
+}
+
 function ringPct(s){
   const w = WEIGHTS.slice();
   // A cached transcript skips the slow part entirely; leaving it weighted at
@@ -797,13 +816,35 @@ function ringPct(s){
   for (let i = 0; i < step - 1; i++) before += w[i];
   const band = step > 0 ? w[step-1] : w[0];
 
-  // Expected seconds for this stage, from the pipeline's own ETA.
+  // Transcription is the one stage that reports REAL progress - it prints
+  // where it is in the source. Use that instead of a curve; on a 67-min
+  // stream the difference is a dial that means something.
+  if (step === 3 && s.heard_frac != null){
+    return (before + band * Math.min(1, s.heard_frac)) / total;
+  }
+
+  // Every other stage: ease across its own band on elapsed time. Expected
+  // duration comes from the pipeline's ETA, split by this stage's weight.
   const runSecs = (s.eta_min ? s.eta_min * 60 : 300);
   const expect = Math.max(3, runSecs * band / total);
   const inStage = Math.max(0, (s.elapsed || 0) - stageAt);
   const eased = 1 - Math.exp(-inStage / (expect * 0.6));
 
   return (before + band * eased) / total;
+}
+
+// "about 16 min" was a static guess baked into the pipeline, and it was ~40%
+// low on a 67-min stream because it assumed transcription runs at 8x
+// realtime. Once there is a real fraction and real elapsed time, t/p beats
+// any constant and corrects itself as the run goes.
+function etaText(s, frac){
+  const t = s.elapsed || 0;
+  if (frac > 0.04 && t > 25){
+    const left = Math.round((t / frac - t) / 60);
+    if (left >= 1) return ` · about ${left} min left`;
+    return ' · nearly done';
+  }
+  return s.eta_min ? ` · about ${s.eta_min} min total` : '';
 }
 
 function paintRing(frac, label, state){
@@ -829,9 +870,11 @@ async function poll(){
       paintRing(0, `Waiting for ${s.queued||1} run${(s.queued||1)===1?'':'s'} ahead…`, 'run');
     } else if (s.status === 'running'){
       running = true; $('go').disabled = true;
-      const eta = s.eta_min ? ` · about ${s.eta_min} min total` : '';
+      const frac = ringPct(s);
       const q = s.queued ? ` · ${s.queued} more queued` : '';
-      paintRing(ringPct(s), (s.stage || 'Starting') + '…' + eta + q, 'run');
+      const hd = (s.step === 3 && s.heard_secs)
+        ? ` · ${mmss(Math.round(s.heard_secs))} of ${mmss(Math.round(s.source_secs||0))} heard` : '';
+      paintRing(frac, (s.stage || 'Starting') + '…' + etaText(s, frac) + hd + q, 'run');
     } else if (s.status === 'done'){
       paintRing(1, `Done — ${s.clips.length} clip${s.clips.length===1?'':'s'} ready`, 'done');
       $('go').disabled = false;
