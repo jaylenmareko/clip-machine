@@ -15,6 +15,7 @@ import os
 import re
 import socketserver
 import threading
+import time
 import urllib.parse
 import webbrowser
 from contextlib import redirect_stdout
@@ -76,7 +77,10 @@ def _progress(log: list[str]) -> dict:
     applied = ignored = None
     for line in log:
         for i, (marker, label) in enumerate(_STAGES):
-            if marker in line:
+            # Never go backwards: compile mode logs "titled by" AFTER [5/6],
+            # the reverse of the clip path, and a ring that reverses reads as
+            # a bug. Highest stage reached wins.
+            if marker in line and i + 1 > index:
                 stage, index = label, i + 1
         if m := _ETA_RE.search(line):
             eta = int(m.group(1))
@@ -86,8 +90,10 @@ def _progress(log: list[str]) -> dict:
             applied = line.split("instruction applied:", 1)[1].strip()
         elif "instruction IGNORED:" in line:
             ignored = line.split("instruction IGNORED:", 1)[1].strip()
+    cached = any("reused cached transcript" in line for line in log)
     return {"stage": stage, "step": index, "steps": len(_STAGES),
-            "eta_min": eta, "applied": applied, "ignored": ignored}
+            "eta_min": eta, "applied": applied, "ignored": ignored,
+            "cached": cached}
 
 
 def _friendly_error(err: Exception, log: list[str]) -> str:
@@ -119,6 +125,7 @@ def _run_job(job: dict) -> None:
     """Execute one job. Called only by the single queue worker."""
     try:
         job["status"] = "running"
+        job["started"] = time.time()
         with redirect_stdout(_LogWriter(job)):
             out_dir = pipeline.run(job["source"], max_clips=job["max_clips"],
                                    use_llm=job["use_llm"], layout=job["layout"],
@@ -383,6 +390,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "free_ram": round(free, 2) if free else None,
                 "model": config.WHISPER_MODEL,
                 "queued": waiting,
+                "elapsed": round(time.time() - job["started"], 1)
+                           if job.get("started") else 0,
                 **_progress(job.get("log", [])),
             })
         elif route == "/api/library":
@@ -479,8 +488,21 @@ PAGE = r"""<!doctype html>
   .chip{font-size:10.5px;letter-spacing:.02em;background:#1b2434;border:1px solid var(--line);
     color:#9fb4d8;border-radius:999px;padding:2px 7px}
   .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
-  .bar{height:5px;background:#0f131b;border-radius:3px;overflow:hidden;margin:10px 0 4px}
-  .fill{height:100%;width:0;background:var(--accent);transition:width .4s ease}
+  .prog{display:flex;align-items:center;gap:18px}
+  .ring{width:96px;height:96px;flex:0 0 auto;transform:rotate(-90deg)}
+  .ring circle{fill:none;stroke-width:8;stroke-linecap:round}
+  .ring .track{stroke:#0f131b}
+  /* 2*PI*52 = 326.7 - the full circumference, so dashoffset maps to percent */
+  .ring .dial{stroke:var(--accent);stroke-dasharray:326.7;stroke-dashoffset:326.7;
+    /* Matches the 1s poll interval, so the arc sweeps continuously
+       instead of jerking for .45s then sitting still for .55s. */
+    transition:stroke-dashoffset 1s linear}
+  .prog.done .dial{stroke:var(--good)}
+  .prog.err .dial{stroke:var(--bad)}
+  .progtext{min-width:0}
+  .pct{font-size:26px;font-weight:600;letter-spacing:-.02em;line-height:1.1}
+  .prog.done .pct{color:var(--good)}
+  .prog.err .pct{color:var(--bad)}
   #details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
   #details pre{margin-top:8px}
   .acts{display:flex;gap:8px;margin-top:10px}
@@ -593,8 +615,16 @@ PAGE = r"""<!doctype html>
 </div>
 
 <div class="panel" id="runpanel" hidden>
-  <div class="status" id="status"></div>
-  <div class="bar"><div class="fill" id="fill"></div></div>
+  <div class="prog" id="prog">
+    <svg class="ring" viewBox="0 0 120 120" aria-hidden="true">
+      <circle class="track" cx="60" cy="60" r="52"></circle>
+      <circle class="dial" id="dial" cx="60" cy="60" r="52"></circle>
+    </svg>
+    <div class="progtext">
+      <div class="pct" id="pct">0%</div>
+      <div class="status" id="status"></div>
+    </div>
+  </div>
   <div class="notice" id="applied" hidden></div>
   <div class="notice warn" id="ignored" hidden></div>
   <details id="details"><summary>Details</summary><pre id="log"></pre></details>
@@ -739,31 +769,77 @@ async function library(expand){
   renderLibrary(lib, expand);
 }
 
+// --- the ring ---------------------------------------------------------
+// Eight stages is only eight jumps, and transcription alone can be minutes,
+// so a percentage driven by step/steps sits frozen for most of the run -
+// exactly the "feels stuck" problem this replaces. Two fixes:
+//
+//  1. WEIGHTS, not equal steps. Downloading and transcribing and rendering
+//     are the run; "Checking the video" and "Finishing up" are instants.
+//     Weighted, 33% means roughly a third of the WORK is done.
+//  2. TIME INSIDE A STAGE. Each stage owns a band of the circle, and the
+//     dial eases across its own band while the stage runs: 1-exp(-t/tau).
+//     Asymptotic, so it always creeps forward, never stalls, and can never
+//     spill into the next stage's band no matter how long the stage takes.
+const WEIGHTS = [15, 2, 40, 6, 12, 5, 35, 1];   // parallel to _STAGES
+const CIRC = 326.7;                             // 2*pi*52, matches the CSS
+let stageAt = 0, stageWas = -1;
+
+function ringPct(s){
+  const w = WEIGHTS.slice();
+  // A cached transcript skips the slow part entirely; leaving it weighted at
+  // 40 would park the ring at 15% through a run that is nearly done.
+  if (s.cached) w[2] = 2;
+  const total = w.reduce((a,b) => a+b, 0);
+  const step = Math.min(s.step || 0, w.length);
+
+  let before = 0;
+  for (let i = 0; i < step - 1; i++) before += w[i];
+  const band = step > 0 ? w[step-1] : w[0];
+
+  // Expected seconds for this stage, from the pipeline's own ETA.
+  const runSecs = (s.eta_min ? s.eta_min * 60 : 300);
+  const expect = Math.max(3, runSecs * band / total);
+  const inStage = Math.max(0, (s.elapsed || 0) - stageAt);
+  const eased = 1 - Math.exp(-inStage / (expect * 0.6));
+
+  return (before + band * eased) / total;
+}
+
+function paintRing(frac, label, state){
+  const p = Math.max(0, Math.min(1, frac));
+  $('dial').style.strokeDashoffset = (CIRC * (1 - p)).toFixed(1);
+  $('pct').textContent = Math.round(p * 100) + '%';
+  const st = $('status');
+  st.textContent = label;
+  st.className = 'status ' + state;
+  $('prog').className = 'prog' +
+    (state === 'done' ? ' done' : state === 'err' ? ' err' : '');
+}
+
 async function poll(){
   try{
     const s = await (await fetch('/api/status')).json();
-    const st = $('status');
     if (s.status !== 'idle') $('runpanel').hidden = false;
-    const pct = s.steps ? Math.round(100 * (s.step||0) / s.steps) : 0;
-    if (s.status === 'running' || s.status === 'queued'){
+    // Elapsed-at-stage-entry, so interpolation measures time in THIS stage.
+    if ((s.step || 0) !== stageWas){ stageWas = s.step || 0; stageAt = s.elapsed || 0; }
+
+    if (s.status === 'queued'){
+      running = true; $('go').disabled = true;
+      paintRing(0, `Waiting for ${s.queued||1} run${(s.queued||1)===1?'':'s'} ahead…`, 'run');
+    } else if (s.status === 'running'){
       running = true; $('go').disabled = true;
       const eta = s.eta_min ? ` · about ${s.eta_min} min total` : '';
       const q = s.queued ? ` · ${s.queued} more queued` : '';
-      st.textContent = (s.stage || 'Starting') + '…' + eta + q;
-      st.className = 'status run';
-      $('fill').style.width = Math.max(pct, 4) + '%';
+      paintRing(ringPct(s), (s.stage || 'Starting') + '…' + eta + q, 'run');
     } else if (s.status === 'done'){
-      st.textContent = `Done — ${s.clips.length} clip${s.clips.length===1?'':'s'} ready`;
-      st.className = 'status done';
-      $('fill').style.width = '100%';
+      paintRing(1, `Done — ${s.clips.length} clip${s.clips.length===1?'':'s'} ready`, 'done');
       $('go').disabled = false;
       // Reload the whole library so the finished run appears as a project
       // folder, expanded, rather than as a detached grid.
       if (running){ library(s.video_id); running = false; }
     } else if (s.status === 'error'){
-      st.textContent = s.error || 'Something went wrong.';
-      st.className = 'status err';
-      $('fill').style.width = '100%';
+      paintRing(1, s.error || 'Something went wrong.', 'err');
       $('details').open = true;
       $('go').disabled = false; running = false;
     }
@@ -777,8 +853,9 @@ async function poll(){
 
     if (s.log && s.log.length) $('log').textContent = s.log.join('\n');
     const pre = $('log'); if (running) pre.scrollTop = pre.scrollHeight;
-  }catch(e){}
-  setTimeout(poll, 1000);
+  }catch(e){ console.error('poll', e); }   // silent here once killed the
+  setTimeout(poll, 1000);  // whole UI after a removed element left a dead ref
+
 }
 library(); poll();
 </script>
