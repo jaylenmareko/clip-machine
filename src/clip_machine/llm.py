@@ -62,10 +62,10 @@ ACCEPTED_INSTRUCTIONS = [
     "Title style",
 ]
 NOT_ACCEPTED = [
-    "clip length or how many clips (both scored automatically)",
-    "layout (detected from the video)",
-    "captions (not generated)",
-    "picking a specific person (no speaker labels yet)",
+    "Clip length or how many clips",
+    "Layout",
+    "Captions",
+    "Picking a specific person",
 ]
 
 
