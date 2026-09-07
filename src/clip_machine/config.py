@@ -53,6 +53,12 @@ WHISPER_THREADS = int(os.environ.get("CLIP_WHISPER_THREADS", "8"))
 # timestamps. Set to 1 to disable. Larger batches use more RAM, which is
 # the binding constraint on this machine.
 BATCH_SIZE = int(os.environ.get("CLIP_BATCH_SIZE", "8"))
+# Chunked parallel transcription (see split_asr.py). 1 disables it. Measured
+# on a 67-min stream, one process reached only 4.2x realtime while the CPU
+# sat at 71% - this machine is 2 P-cores + 8 E-cores and a single batch is
+# paced by whichever thread lands on an E-core. Separate processes on
+# separate slices dodge that. Clamped at runtime by free RAM.
+ASR_WORKERS = int(os.environ.get("CLIP_ASR_WORKERS", "1"))
 
 # --- clip scoring (local, Ollama; falls back to heuristics if absent) ---
 OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")

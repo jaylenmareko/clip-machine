@@ -82,6 +82,27 @@ def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
     """Return a flat list of {word, start, end} for the whole video."""
     audio_path = extract_audio(video_path)
     preflight()
+
+    # Chunked parallel path, when asked for and when RAM allows. Returns None
+    # for short sources, where per-worker model loading costs more than it
+    # saves, and the single-process path below handles those.
+    if config.ASR_WORKERS > 1:
+        import os as _os
+
+        from . import split_asr
+        n = split_asr.plan_workers(
+            config.ASR_WORKERS, free_ram_gb(),
+            _MODEL_RAM_GB.get(config.WHISPER_MODEL, 2.0), _os.cpu_count() or 4)
+        if n < config.ASR_WORKERS and verbose:
+            print(f"      (asking for {config.ASR_WORKERS} ASR workers, "
+                  f"only {n} fit in free RAM)")
+        words = split_asr.transcribe_parallel(
+            audio_path, config.WORK_DIR, config.WHISPER_MODEL,
+            workers=n, threads=config.WHISPER_THREADS,
+            batch=config.BATCH_SIZE, verbose=verbose)
+        if words is not None:
+            return words
+
     model = _get_model()
 
     # Batched inference is ~2.5x faster than sequential on this CPU (measured
