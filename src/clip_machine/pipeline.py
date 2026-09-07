@@ -9,11 +9,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import audio_features, config, cut, download, llm, modes, score, transcribe
+from . import (audio_features, config, cut, download, layout as layout_detect,
+               llm, modes, score, transcribe)
 
 
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
-        mode: str = "auto", layout: str = "center") -> Path:
+        mode: str = "auto", layout: str = "auto") -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -22,6 +23,10 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
     out_dir = config.CLIPS_DIR / video_id
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if layout == "auto":
+        print("[1b/6] Detecting layout from the source...")
+        layout = layout_detect.detect(video_path)
 
     print(f"[2/6] Transcribing locally (faster-whisper {config.WHISPER_MODEL}) — "
           f"this is the slow part...")
@@ -49,21 +54,21 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         print(f"      -> pulling up to {max_clips} clips "
               f"({words[-1]['end']/60:.0f} min of source)")
 
-    print(f"[4/6] Scoring clip candidates{' (+ local LLM rerank)' if use_llm else ''}...")
+    print(f"[4/6] Scoring clip candidates{' (+ Claude rerank)' if use_llm else ''}...")
     clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm,
                              mode_key=mode, energy=energy)
     print(f"      -> {len(clips)} clips selected")
+
+    # House-style titles for the final picks; falls back to the hook line.
+    titles = llm.title_clips(clips) or {}
+    for i, c in enumerate(clips):
+        c["title_text"] = titles.get(i) or c["hook"]
 
     # Default 1. Parallel rendering was measured on this machine at 186s /
     # 212s / 157s for 1 / 2 / 3 workers - non-monotonic, i.e. noise rather
     # than speedup, because libx264 already saturates the CPU and extra
     # ffmpeg processes just contend. Raise CLIP_RENDER_WORKERS on a machine
     # with real headroom; here it only adds OOM risk.
-    # House-style titles for the final picks; falls back to the hook line.
-    titles = llm.title_clips(clips) or {}
-    for i, c in enumerate(clips):
-        c["title_text"] = titles.get(i) or c["hook"]
-
     workers = max(1, int(os.environ.get("CLIP_RENDER_WORKERS", "1")))
     print(f"[5/6] Rendering {config.OUT_WIDTH}x{config.OUT_HEIGHT} clips"
           f"{f' ({workers} in parallel)' if workers > 1 else ''}...")
@@ -122,11 +127,12 @@ def main() -> None:
     p.add_argument("--max-clips", type=int, default=None,
                    help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
-                   help="skip the Ollama rerank, use heuristics only")
+                   help="skip Claude reranking, use heuristics only")
     p.add_argument("--mode", default="auto", choices=["auto"] + list(modes.MODES),
                    help="auto hunts every kind at once (default); name one to force it")
-    p.add_argument("--layout", default="center", choices=list(cut.LAYOUTS),
-                   help="center crop, or 50/50 split-screen for a two-person source")
+    p.add_argument("--layout", default="auto",
+                   choices=["auto"] + list(cut.LAYOUTS),
+                   help="auto detects a side-by-side source (default)")
     args = p.parse_args()
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
         mode=args.mode, layout=args.layout)

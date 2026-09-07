@@ -212,7 +212,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # This defaulted to False when the old checkbox was removed, which
             # silently skipped Claude for every run started from the UI.
             True,
-            data.get("layout") or "center",
+            # Detected from the source; the user is not asked.
+            data.get("layout") or "auto",
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -242,7 +243,7 @@ PAGE = r"""<!doctype html>
   input,select{width:100%;background:#0f131b;border:1px solid var(--line);color:var(--text);
     border-radius:8px;padding:10px 12px;font:inherit}
   input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
-  .row{display:grid;grid-template-columns:1fr 100px 140px;gap:12px}
+  .row{display:grid;grid-template-columns:1fr;gap:12px}
   .row-mode{margin-top:12px}
   .modes{display:flex;gap:8px;flex-wrap:wrap}
   .mode{border:1px solid var(--line);background:#0f131b;border-radius:8px;
@@ -294,19 +295,12 @@ PAGE = r"""<!doctype html>
       <label for="src">Video URL or local file path</label>
       <input id="src" placeholder="https://youtube.com/watch?v=…  or  C:\path\to\video.mp4">
     </div>
-    <div>
-      <label for="layout">Layout</label>
-      <select id="layout">
-        <option value="center">Center crop</option>
-        <option value="split">Split-screen</option>
-      </select>
-    </div>
   </div>
 
   <div class="row2">
     <button id="go">Generate clips</button>
   </div>
-  <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass.</div>
+  <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass. Layout is detected from the video.</div>
 </div>
 
 <div class="panel" id="runpanel" hidden>
@@ -331,7 +325,7 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source, layout:$('layout').value })
+    body: JSON.stringify({ source })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
