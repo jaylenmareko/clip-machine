@@ -9,14 +9,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import (audio_features, config, cut, download, layout as layout_detect,
-               llm, looks, modes, score, transcribe)
+from . import (assemble, audio_features, config, cut, download,
+               layout as layout_detect, llm, looks, modes, score,
+               transcribe)
 
 
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         mode: str = "auto", layout: str = "auto",
         instructions: str | None = None,
-        look: str | None = None, radius: int | None = None) -> Path:
+        look: str | None = None, radius: int | None = None,
+        compile_to: float | None = None) -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -66,6 +68,10 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
     if max_clips is None:
         max_clips = config.auto_clip_count(float(words[-1]["end"]))
+        if compile_to:
+            # Need enough ranked material to fill the target, with slack for
+            # whatever the quality floor drops.
+            max_clips = max(max_clips, int(compile_to / 25) + 4)
         print(f"      -> pulling up to {max_clips} clips "
               f"({words[-1]['end']/60:.0f} min of source)")
 
@@ -74,6 +80,46 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
                              mode_key=mode, energy=energy,
                              instructions=instructions)
     print(f"      -> {len(clips)} clips selected")
+
+    if compile_to:
+        segments = assemble.choose(clips, compile_to)
+        total = sum(c["duration"] for c in segments)
+        mins, secs = divmod(int(round(total)), 60)
+        print(f"[5/6] Assembling ONE video: {len(segments)} segments, "
+              f"{mins}:{secs:02d}...")
+        out = out_dir / f"compiled_{mins}m{secs:02d}s.mp4"
+        assemble.build(video_path, segments, out, layout=layout, look=look,
+                       radius=radius, work_dir=config.WORK_DIR)
+        thumb = cut.make_thumbnail(out, out.with_suffix(".jpg"))
+
+        titles = llm.title_clips([{"duration": total,
+                                   "text": " ".join(c["text"] for c in segments)}],
+                                 instructions=instructions) or {}
+        manifest = [{
+            "file": out.name,
+            "thumb": thumb.name if thumb else None,
+            "start": round(segments[0]["start"], 2) if segments else 0,
+            "end": round(segments[-1]["end"], 2) if segments else 0,
+            "duration": round(total, 2),
+            "score": round(max((c["score"] for c in segments), default=0), 2),
+            "title": titles.get(0) or (segments[0]["hook"] if segments else ""),
+            "hook": segments[0]["hook"] if segments else "",
+            "signals": sorted({s for c in segments for s in c.get("signals", [])}),
+            "mode": "compilation",
+            "segments": [{"start": round(c["start"], 2),
+                          "end": round(c["end"], 2),
+                          "duration": round(c["duration"], 2)}
+                         for c in segments],
+            "transcript": " ".join(c["text"] for c in segments),
+        }]
+        print(f"      -> {out.name}  ({total:.0f}s from {len(segments)} segments)")
+        print("[6/6] Writing manifest...")
+        (out_dir / "manifest.json").write_text(
+            json.dumps({"source": source, "video_id": video_id,
+                        "mode": "compilation", "clips": manifest}, indent=2),
+            encoding="utf-8")
+        print(f"\nDone in {time.time() - t0:.0f}s — {out_dir}")
+        return out_dir
 
     # House-style titles for the final picks; falls back to the hook line.
     titles = llm.title_clips(clips, instructions=instructions) or {}
@@ -148,6 +194,8 @@ def main() -> None:
                    help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
                    help="skip Claude reranking, use heuristics only")
+    p.add_argument("--compile", default=None, dest="compile_to",
+                   help="assemble ONE video of this length, e.g. 2:50")
     p.add_argument("--radius", type=int, default=None,
                    help=f"rounded corner radius in px, 0 = off "
                         f"(default {config.CORNER_RADIUS})")
@@ -164,7 +212,8 @@ def main() -> None:
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
         mode=args.mode, layout=args.layout,
         instructions=args.instructions, look=args.look,
-        radius=args.radius)
+        radius=args.radius,
+        compile_to=assemble.parse_target(args.compile_to))
 
 
 if __name__ == "__main__":
