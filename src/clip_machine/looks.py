@@ -91,10 +91,10 @@ def _chain(width: int, temp: int, sat: float, black: float, white: float,
     )
 
 
-# Ordered light -> strong. "nostalgia" is the default: the look Jaylen picked,
-# dialled back a step at his request.
+# Ordered light -> strong. Default is "none" - the treatments are options, not
+# a house style. "nostalgia" is the one Jaylen picked, dialled back a step.
 LOOKS = ("none", "nostalgia-light", "nostalgia", "nostalgia-strong")
-DEFAULT = "nostalgia"
+DEFAULT = "none"
 
 _PRESETS = {
     #                     width temp   sat  black white grain lines

@@ -50,10 +50,16 @@ OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("CLIP_OLLAMA_MODEL", "llama3.2:3b")
 
 # --- picture treatment ---
-# See looks.py. "nostalgia" is the look Jaylen picked, one step dialled back.
-LOOK = os.environ.get("CLIP_LOOK", "nostalgia")
-# Rounded corners, in pixels at the output size. 0 disables. The mask is
-# generated once and cached, so this costs almost nothing per clip.
+# Both OFF by default. The clips ship untreated; the looks are available when
+# a particular video wants one, per Jaylen. Neither is a house style yet.
+#
+# LOOK: none | nostalgia-light | nostalgia | nostalgia-strong  (see looks.py)
+#   CLIP_LOOK=nostalgia   or  --look nostalgia
+LOOK = os.environ.get("CLIP_LOOK", "none")
+# CORNER_RADIUS: rounded corners in pixels at the output size, 0 disables.
+#   CLIP_CORNER_RADIUS=48  or  --radius 48
+# Untested on a real upload - on a full-screen feed these render as black
+# corners, which reads deliberate on a dark UI and broken on a light one.
 CORNER_RADIUS = int(os.environ.get("CLIP_CORNER_RADIUS", "0"))
 
 # --- how many clips ---
