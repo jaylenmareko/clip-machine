@@ -27,6 +27,41 @@ Windows Movies & TV. That bug shipped once already.
 _SAFE = "format=yuv420p"
 
 
+# --------------------------------------------------------------------------
+# Rounded corners
+#
+# ffmpeg has no rounded-rectangle primitive. `geq` can express one, but it is
+# a per-pixel expression VM - fine for a single frame, hopeless for 30fps
+# (720x1280x30x24s is ~660M evaluations). So the mask is rendered ONCE to a
+# cached PNG and composited per clip, which is effectively free.
+# --------------------------------------------------------------------------
+def corner_mask(width: int, height: int, radius: int):
+    """Path to a cached rounded-rect mask (white inside, black outside)."""
+    import subprocess
+
+    from . import config
+
+    path = config.WORK_DIR / f"mask_{width}x{height}_r{radius}.png"
+    if path.exists():
+        return path
+    config.WORK_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Distance from the nearest corner-circle centre, but only inside the
+    # corner squares - elsewhere dx and dy clamp to 0 so the test passes.
+    dx = f"max(max({radius}-X,X-({width}-1-{radius})),0)"
+    dy = f"max(max({radius}-Y,Y-({height}-1-{radius})),0)"
+    expr = f"if(lte(hypot({dx},{dy}),{radius}),255,0)"
+
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error",
+         "-f", "lavfi", "-i", f"color=black:s={width}x{height}",
+         "-vf", f"geq=lum='{expr}':cb=128:cr=128,format=gray",
+         "-frames:v", "1", str(path)],
+        check=True, capture_output=True, timeout=120,
+    )
+    return path
+
+
 def _chain(width: int, temp: int, sat: float, black: float, white: float,
            grain: int, lines: bool, out_w: int, out_h: int) -> str:
     """One recipe at a given intensity.

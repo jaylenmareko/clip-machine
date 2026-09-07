@@ -16,7 +16,7 @@ from . import (audio_features, config, cut, download, layout as layout_detect,
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         mode: str = "auto", layout: str = "auto",
         instructions: str | None = None,
-        look: str | None = None) -> Path:
+        look: str | None = None, radius: int | None = None) -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -93,7 +93,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     def render_one(n: int, c: dict) -> dict:
         clip_path = out_dir / f"clip_{n:02d}.mp4"
         cut.render_clip(video_path, c["start"], c["end"], clip_path,
-                        layout=layout, look=look)
+                        layout=layout, look=look, radius=radius)
         thumb = cut.make_thumbnail(clip_path, out_dir / f"clip_{n:02d}.jpg")
 
         print(f"      -> clip_{n:02d}.mp4  "
@@ -148,6 +148,9 @@ def main() -> None:
                    help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
                    help="skip Claude reranking, use heuristics only")
+    p.add_argument("--radius", type=int, default=None,
+                   help=f"rounded corner radius in px, 0 = off "
+                        f"(default {config.CORNER_RADIUS})")
     p.add_argument("--look", default=None, choices=list(looks.LOOKS),
                    help=f"picture treatment (default {config.LOOK})")
     p.add_argument("--say", default=None, dest="instructions",
@@ -160,7 +163,8 @@ def main() -> None:
     args = p.parse_args()
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
         mode=args.mode, layout=args.layout,
-        instructions=args.instructions, look=args.look)
+        instructions=args.instructions, look=args.look,
+        radius=args.radius)
 
 
 if __name__ == "__main__":

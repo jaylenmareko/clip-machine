@@ -52,6 +52,9 @@ OLLAMA_MODEL = os.environ.get("CLIP_OLLAMA_MODEL", "llama3.2:3b")
 # --- picture treatment ---
 # See looks.py. "nostalgia" is the look Jaylen picked, one step dialled back.
 LOOK = os.environ.get("CLIP_LOOK", "nostalgia")
+# Rounded corners, in pixels at the output size. 0 disables. The mask is
+# generated once and cached, so this costs almost nothing per clip.
+CORNER_RADIUS = int(os.environ.get("CLIP_CORNER_RADIUS", "0"))
 
 # --- how many clips ---
 # OpusClip produces 15-30 clips from a long video (one reported 25 from a
