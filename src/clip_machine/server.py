@@ -50,6 +50,62 @@ class _LogWriter:
         pass
 
 
+# The pipeline's own output is developer text - "energy profile ready",
+# "quality floor dropped 2 weak candidates", "ranked by claude-haiku-4-5
+# (2814 in / 35 out)". Useful in a terminal, alarming in a product. These map
+# the stage markers onto something a stranger can read; the raw log stays
+# available behind a details toggle.
+_STAGES = [
+    ("[1/6]", "Downloading the video"),
+    ("[1b/6]", "Checking the video"),
+    ("[2/6]", "Transcribing the audio"),
+    ("[3/6]", "Listening for energy"),
+    ("[4/6]", "Finding the best moments"),
+    ("titled by", "Writing titles"),
+    ("[5/6]", "Making the clips"),
+    ("[6/6]", "Finishing up"),
+]
+_ETA_RE = re.compile(r"about (\d+) min to process")
+
+
+def _progress(log: list[str]) -> dict:
+    """Derive a friendly stage + ETA from the pipeline's own output."""
+    stage, index = "Starting", 0
+    eta = None
+    for line in log:
+        for i, (marker, label) in enumerate(_STAGES):
+            if marker in line:
+                stage, index = label, i + 1
+        if m := _ETA_RE.search(line):
+            eta = int(m.group(1))
+    return {"stage": stage, "step": index, "steps": len(_STAGES), "eta_min": eta}
+
+
+def _friendly_error(err: Exception, log: list[str]) -> str:
+    """Turn an exception into something worth showing a person."""
+    text = f"{type(err).__name__}: {err}".lower()
+    blob = " ".join(log[-12:]).lower()
+
+    if isinstance(err, FileNotFoundError):
+        return "Couldn't find that file. Check the path and try again."
+    if "no speech" in text:
+        return "No speech was detected in that video."
+    if any(k in text + blob for k in
+           ("yt-dlp", "unavailable", "private", "sign in", "http error 4",
+            "unsupported url", "is not a valid url")):
+        return ("Couldn't download that video. Make sure the link is public "
+                "and playable without signing in.")
+    if "credit balance" in text + blob:
+        return ("Claude credit ran out, so clips were ranked locally instead. "
+                "Top up at console.anthropic.com for better picks.")
+    if any(k in text for k in ("memory", "killed", "oom")):
+        return ("Ran out of memory. Close other apps and try again, or use a "
+                "shorter video.")
+    if "ffmpeg" in text or "calledprocesserror" in text:
+        return "The video couldn't be processed. It may be corrupt or an unusual format."
+    return "Something went wrong. Open Details for the technical log."
+
+
 def _worker(job: dict, source: str, max_clips: int | None, use_llm: bool,
             layout: str) -> None:
     try:
@@ -63,7 +119,7 @@ def _worker(job: dict, source: str, max_clips: int | None, use_llm: bool,
         job["status"] = "done"
     except Exception as e:
         job["status"] = "error"
-        job["error"] = f"{type(e).__name__}: {e}"
+        job["error"] = _friendly_error(e, job.get("log", []))
         job["log"].append(f"ERROR  {type(e).__name__}: {e}")
 
 
@@ -180,6 +236,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "error": job.get("error"),
                 "free_ram": round(free, 2) if free else None,
                 "model": config.WHISPER_MODEL,
+                **_progress(job.get("log", [])),
             })
         elif route == "/api/library":
             self._send_json(_library())
@@ -255,6 +312,10 @@ PAGE = r"""<!doctype html>
   .chip{font-size:10.5px;letter-spacing:.02em;background:#1b2434;border:1px solid var(--line);
     color:#9fb4d8;border-radius:999px;padding:2px 7px}
   .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
+  .bar{height:5px;background:#0f131b;border-radius:3px;overflow:hidden;margin:10px 0 4px}
+  .fill{height:100%;width:0;background:var(--accent);transition:width .4s ease}
+  #details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
+  #details pre{margin-top:8px}
   .acts{display:flex;gap:8px;margin-top:10px}
   .btn{flex:1;text-align:center;background:var(--accent);color:#0a1020;border:0;
     border-radius:7px;padding:7px 10px;font:600 12px/1.4 inherit;cursor:pointer;
@@ -312,7 +373,8 @@ PAGE = r"""<!doctype html>
 
 <div class="panel" id="runpanel" hidden>
   <div class="status" id="status"></div>
-  <pre id="log"></pre>
+  <div class="bar"><div class="fill" id="fill"></div></div>
+  <details id="details"><summary>Details</summary><pre id="log"></pre></details>
 </div>
 
 <h2>Clips</h2>
@@ -346,7 +408,8 @@ function card(c, vid){
     return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
   };
   return `<div class="clip">
-    <video src="${src}" controls preload="metadata"></video>
+    <video src="${src}" controls preload="metadata"
+      ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
       <p class="hook">${esc(c.title || c.hook)}</p>
       <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
@@ -392,15 +455,24 @@ async function poll(){
     }
     const st = $('status');
     if (s.status !== 'idle') $('runpanel').hidden = false;
+    const pct = s.steps ? Math.round(100 * (s.step||0) / s.steps) : 0;
     if (s.status === 'running' || s.status === 'queued'){
       running = true; $('go').disabled = true;
-      st.textContent = 'Running…'; st.className = 'status run';
+      const eta = s.eta_min ? ` · about ${s.eta_min} min total` : '';
+      st.textContent = (s.stage || 'Starting') + '…' + eta;
+      st.className = 'status run';
+      $('fill').style.width = Math.max(pct, 4) + '%';
     } else if (s.status === 'done'){
-      st.textContent = `Done — ${s.clips.length} clips`; st.className = 'status done';
+      st.textContent = `Done — ${s.clips.length} clip${s.clips.length===1?'':'s'} ready`;
+      st.className = 'status done';
+      $('fill').style.width = '100%';
       $('go').disabled = false;
       if (running){ render(s.clips, s.video_id); running = false; }
     } else if (s.status === 'error'){
-      st.textContent = s.error || 'Failed'; st.className = 'status err';
+      st.textContent = s.error || 'Something went wrong.';
+      st.className = 'status err';
+      $('fill').style.width = '100%';
+      $('details').open = true;
       $('go').disabled = false; running = false;
     }
     if (s.log && s.log.length) $('log').textContent = s.log.join('\n');

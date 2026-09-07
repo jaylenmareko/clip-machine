@@ -28,9 +28,22 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         print("[1b/6] Detecting layout from the source...")
         layout = layout_detect.detect(video_path)
 
+    words_cache = config.WORK_DIR / f"{video_id}.words.json"
+
+    # Tell the user how long this will take before they start waiting. Rates
+    # are the ones measured on this machine: transcription ~8x realtime with
+    # batched tiny.en, energy ~107x, render ~0.24s per second of output.
+    source_secs = layout_detect._duration(video_path)
+    if source_secs > 0:
+        eta = source_secs / 107.0 + 40.0          # energy + rank/title calls
+        if not words_cache.exists():
+            eta += source_secs / 8.0              # transcription, the slow part
+        eta += config.auto_clip_count(source_secs) * 70 * 0.24   # rendering
+        print(f"      -> {source_secs/60:.0f} min of source; "
+              f"about {max(1, round(eta / 60))} min to process")
+
     print(f"[2/6] Transcribing locally (faster-whisper {config.WHISPER_MODEL}) — "
           f"this is the slow part...")
-    words_cache = config.WORK_DIR / f"{video_id}.words.json"
     if words_cache.exists():
         words = json.loads(words_cache.read_text(encoding="utf-8"))
         print(f"      -> reused cached transcript ({len(words)} words)")
@@ -76,12 +89,14 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     def render_one(n: int, c: dict) -> dict:
         clip_path = out_dir / f"clip_{n:02d}.mp4"
         cut.render_clip(video_path, c["start"], c["end"], clip_path, layout=layout)
+        thumb = cut.make_thumbnail(clip_path, out_dir / f"clip_{n:02d}.jpg")
 
         print(f"      -> clip_{n:02d}.mp4  "
               f"({c['duration']:.0f}s @ {c['start']:.0f}s)  "
               f"{c.get('title_text', c['hook'])[:72]}")
         return {
             "file": clip_path.name,
+            "thumb": thumb.name if thumb else None,
             "start": round(c["start"], 2),
             "end": round(c["end"], 2),
             "duration": round(c["duration"], 2),

@@ -39,6 +39,24 @@ def _split(w: int, h: int) -> str:
     )
 
 
+def make_thumbnail(clip_path: Path, out_path: Path, at: float = 1.0) -> Path | None:
+    """Grab a poster frame so the grid is scannable before anything is played.
+
+    Without this the library is a wall of black rectangles - <video> shows
+    nothing until the user presses play.
+    """
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", f"{at:.2f}",
+             "-i", str(clip_path.resolve()), "-frames:v", "1",
+             "-vf", "scale=360:-2", str(out_path.resolve())],
+            check=True, capture_output=True, timeout=120,
+        )
+        return out_path
+    except Exception:
+        return None
+
+
 def render_clip(
     video_path: Path,
     start: float,
