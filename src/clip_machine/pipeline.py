@@ -49,7 +49,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     print(f"[2/6] Transcribing locally (faster-whisper {config.WHISPER_MODEL}) — "
           f"this is the slow part...")
     if words_cache.exists():
-        words = json.loads(words_cache.read_text(encoding="utf-8"))
+        words = json.loads(words_cache.read_text(encoding="utf-8-sig"))
         print(f"      -> reused cached transcript ({len(words)} words)")
     else:
         words = transcribe.transcribe(video_path)

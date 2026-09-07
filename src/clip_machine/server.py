@@ -150,7 +150,7 @@ def _run_job(job: dict) -> None:
             out_dir = pipeline.run(job["source"], max_clips=job["max_clips"],
                                    use_llm=job["use_llm"], layout=job["layout"],
                                    instructions=job.get("instructions"))
-        manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8-sig"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
         job["status"] = "done"
@@ -225,23 +225,64 @@ def _feedback_path(video_id: str) -> Path:
     return config.CLIPS_DIR / video_id / "feedback.json"
 
 
+# Three states, not two: unreviewed / approved / rejected.
+#
+# "keep" used to exist and was removed as redundant - a clip stayed unless
+# rejected, so the button asserted the default. "approve" is a different
+# claim: PUBLISH THIS. It is the scheduler's input queue, so unreviewed and
+# approved have to be distinguishable, which they were not before.
+#
+# A rejection also carries a REASON. Without one the reject button is just a
+# filter on the zip; with one it becomes the only labelled data about what
+# Jaylen considers a bad clip, which is what any later "can a model review
+# this yet?" question has to be measured against.
+VERDICTS = ("approve", "reject")
+
+
 def _read_feedback(video_id: str) -> dict:
+    """{file: {"verdict": ..., "reason": ..., "at": epoch}}
+
+    Older files stored a bare string per clip ({"clip_01.mp4": "reject"}).
+    Those are normalised on read rather than migrated on disk, so an old
+    project keeps working and nothing has to be rewritten.
+    """
     p = _feedback_path(video_id)
     if not p.exists():
         return {}
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except Exception:
+        # utf-8-sig, not utf-8: a BOM here used to raise, get swallowed by
+        # the except below, and silently discard every verdict in the
+        # project. Windows tools add one without asking.
+        raw = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception as e:
+        print(f"  ! could not read {p.name}: {type(e).__name__}: {e}")
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for file, v in raw.items():
+        if isinstance(v, str):
+            # "keep" predates approve and meant only "not rejected", which
+            # is the unreviewed default - so it is dropped, not upgraded to
+            # an approval the user never gave.
+            if v == "reject":
+                out[file] = {"verdict": "reject", "reason": "", "at": 0}
+        elif isinstance(v, dict) and v.get("verdict") in VERDICTS:
+            out[file] = {"verdict": v["verdict"],
+                         "reason": str(v.get("reason", ""))[:2000],
+                         "at": int(v.get("at", 0) or 0)}
+    return out
 
 
-def _write_feedback(video_id: str, file: str, verdict: str | None) -> dict:
+def _write_feedback(video_id: str, file: str, verdict: str | None,
+                    reason: str = "") -> dict:
     data = _read_feedback(video_id)
-    if verdict in ("keep", "reject"):
-        data[file] = verdict
+    if verdict in VERDICTS:
+        data[file] = {"verdict": verdict,
+                      "reason": (reason or "").strip()[:2000],
+                      "at": int(time.time())}
     else:
-        data.pop(file, None)   # a third click clears the verdict
+        data.pop(file, None)   # clicking the active verdict clears it
     path = _feedback_path(video_id)
     if path.parent.exists():
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -260,12 +301,13 @@ def _build_zip(video_id: str) -> Path | None:
         return None
 
     try:
-        clips = json.loads(manifest_path.read_text(encoding="utf-8")).get("clips", [])
+        clips = json.loads(manifest_path.read_text(encoding="utf-8-sig")).get("clips", [])
     except Exception:
         return None
 
     verdicts = _read_feedback(video_id)
-    keep = [c for c in clips if verdicts.get(c["file"]) != "reject"]
+    keep = [c for c in clips
+            if verdicts.get(c["file"], {}).get("verdict") != "reject"]
     if not keep:
         return None
 
@@ -314,7 +356,7 @@ def _library() -> list[dict]:
         if not (d.is_dir() and manifest.exists()):
             continue
         try:
-            m = json.loads(manifest.read_text(encoding="utf-8"))
+            m = json.loads(manifest.read_text(encoding="utf-8-sig"))
         except Exception:
             continue
         clips = m.get("clips", [])
@@ -328,7 +370,10 @@ def _library() -> list[dict]:
             "mode": m.get("mode", ""),
             "created": int(d.stat().st_mtime),
             "total_seconds": round(sum(c.get("duration", 0) for c in clips)),
-            "rejected": sum(1 for v in feedback.values() if v == "reject"),
+            "rejected": sum(1 for v in feedback.values()
+                            if v.get("verdict") == "reject"),
+            "approved": sum(1 for v in feedback.values()
+                            if v.get("verdict") == "approve"),
         })
     return out
 
@@ -455,7 +500,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not vid or not file or "/" in file or ".." in file + vid:
                 self._send_json({"error": "bad request"}, 400)
                 return
-            self._send_json({"ok": True, "feedback": _write_feedback(vid, file, verdict)})
+            reason = data.get("reason") or ""
+            self._send_json({"ok": True,
+                             "feedback": _write_feedback(vid, file, verdict,
+                                                         reason)})
             return
 
         source = (data.get("source") or "").strip()
@@ -558,12 +606,30 @@ PAGE = r"""<!doctype html>
   /* Keep was removed - a clip is kept unless it is rejected, so the button
      asserted a state that was already the default. Reject is the only verdict
      now, and it reads red rather than neutral-grey. */
+  .vote button.app{color:var(--good);border-color:#2c4a37}
+  .vote button.app:hover{background:#16261d;border-color:#3d6a4d;color:var(--good)}
+  .vote button.on-app{background:var(--good);border-color:var(--good);
+    color:#08130c;font-weight:600}
+  .vote button.on-app:hover{background:#3f9e6a;border-color:#3f9e6a;color:#08130c}
   .vote button.rej{color:var(--bad);border-color:#4d2c2b}
   .vote button.rej:hover{background:#2a1a1a;border-color:#6b3a38;color:var(--bad)}
   .vote button.on-rej{background:var(--bad);border-color:var(--bad);color:#fff;
     font-weight:600}
   .vote button.on-rej:hover{background:#c2413f;border-color:#c2413f;color:#fff}
   .clip.rejected{opacity:.42}
+  .clip.approved{border-color:#2c4a37;box-shadow:inset 0 0 0 1px #2c4a3755}
+  /* The reason box only appears once Reject is pressed - the verdict is not
+     sent until Submit, so a mis-click costs nothing. */
+  .why{margin-top:8px}
+  .why textarea{width:100%;background:#0f131b;border:1px solid var(--line);
+    color:var(--text);border-radius:7px;padding:7px 9px;font:inherit;
+    font-size:12px;resize:vertical;box-sizing:border-box}
+  .why textarea:focus{outline:none;border-color:var(--accent)}
+  .whyacts{display:flex;gap:8px;margin-top:6px}
+  .whyacts .btn{padding:6px;border:1px solid transparent}
+  .whyacts .btn:disabled{opacity:.4;cursor:not-allowed}
+  .rwhy{margin:7px 0 0;font-size:11.5px;line-height:1.45;color:#c78b88;
+    border-left:2px solid #4d2c2b;padding-left:8px}
   .proj{background:var(--panel);border:1px solid var(--line);border-radius:12px;
     margin-top:14px;overflow:hidden}
   .proj>summary{cursor:pointer;padding:14px 16px;display:flex;align-items:baseline;
@@ -714,32 +780,103 @@ document.addEventListener('click', async e => {
   const card = b.closest('.clip');
   const vid = card.dataset.vid, file = card.dataset.file;
   const want = b.dataset.vote;
-  const now = (FEEDBACK[vid]||{})[file];
-  const verdict = now === want ? null : want;   // clicking again clears it
+  const now = ((FEEDBACK[vid]||{})[file]||{}).verdict || '';
+
+  // Rejecting asks WHY first. The reason is the whole point of the button -
+  // a bare reject is just a zip filter, a reason is the only record of what
+  // counts as a bad clip - so the verdict is not sent until Submit.
+  if (want === 'reject' && now !== 'reject') {
+    const why = card.querySelector('.why');
+    why.hidden = false;
+    why.querySelector('textarea').focus();
+    return;
+  }
+  await sendVerdict(card, now === want ? null : want, '');
+});
+
+async function sendVerdict(card, verdict, reason){
+  const vid = card.dataset.vid, file = card.dataset.file;
   try {
     const r = await fetch('/api/feedback', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({video_id: vid, file, verdict})
+      body: JSON.stringify({video_id: vid, file, verdict, reason})
     });
     const j = await r.json();
     FEEDBACK[vid] = j.feedback || {};
-    const rejBtn = card.querySelector('[data-vote=reject]');
-    const v = FEEDBACK[vid][file] || '';
-    rejBtn.className = v==='reject' ? 'rej on-rej' : 'rej';
-    rejBtn.textContent = v==='reject' ? 'Rejected' : 'Reject';
-    card.classList.toggle('rejected', v==='reject');
+    paintVerdict(card, vid, file);
     updateAllBar(vid);
   } catch (err) {}
+}
+
+function paintVerdict(card, vid, file){
+  const fb = (FEEDBACK[vid]||{})[file] || {};
+  const v = fb.verdict || '';
+  const appBtn = card.querySelector('[data-vote=approve]');
+  const rejBtn = card.querySelector('[data-vote=reject]');
+  appBtn.className = v==='approve' ? 'app on-app' : 'app';
+  appBtn.textContent = v==='approve' ? 'Approved' : 'Approve';
+  rejBtn.className = v==='reject' ? 'rej on-rej' : 'rej';
+  rejBtn.textContent = v==='reject' ? 'Rejected' : 'Reject';
+  card.classList.toggle('rejected', v==='reject');
+  card.classList.toggle('approved', v==='approve');
+
+  const why = card.querySelector('.why');
+  why.hidden = true;
+  const ta = why.querySelector('textarea');
+  ta.value = '';
+  why.querySelector('.wsubmit').disabled = true;
+
+  // Show the recorded reason under a rejected clip, so a decision made
+  // last week still explains itself.
+  let note = card.querySelector('.rwhy');
+  if (v === 'reject' && fb.reason) {
+    if (!note) {
+      note = document.createElement('p');
+      note.className = 'rwhy';
+      why.after(note);
+    }
+    note.textContent = fb.reason;
+  } else if (note) {
+    note.remove();
+  }
+}
+
+// Submit / Cancel inside the reason box, and the enabled state of Submit.
+document.addEventListener('input', e => {
+  const ta = e.target.closest('.why textarea');
+  if (!ta) return;
+  ta.closest('.why').querySelector('.wsubmit').disabled = !ta.value.trim();
+});
+
+document.addEventListener('click', async e => {
+  const cancel = e.target.closest('.why .wcancel');
+  if (cancel) {
+    const why = cancel.closest('.why');
+    why.hidden = true;
+    why.querySelector('textarea').value = '';
+    why.querySelector('.wsubmit').disabled = true;
+    return;
+  }
+  const submit = e.target.closest('.why .wsubmit');
+  if (!submit || submit.disabled) return;
+  const why = submit.closest('.why');
+  await sendVerdict(submit.closest('.clip'), 'reject',
+                    why.querySelector('textarea').value.trim());
 });
 
 function updateAllBar(vid){
   // Refresh just this project's note - how many clips the zip will skip.
   const fb = FEEDBACK[vid] || {};
-  const rejected = Object.values(fb).filter(x => x==='reject').length;
+  const vals = Object.values(fb);
+  const rejected = vals.filter(x => x.verdict==='reject').length;
+  const approved = vals.filter(x => x.verdict==='approve').length;
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
-  if (note) note.textContent = rejected
-    ? `${rejected} rejected, excluded from the zip`
-    : 'zips every clip plus a titles file';
+  if (!note) return;
+  const bits = [];
+  if (approved) bits.push(`${approved} approved`);
+  if (rejected) bits.push(`${rejected} rejected, excluded from the zip`);
+  note.textContent = bits.length ? bits.join(' · ')
+                                 : 'zips every clip plus a titles file';
 }
 
 $('go').onclick = async () => {
@@ -775,10 +912,11 @@ function card(c, vid){
     s = Math.round(s||0);
     return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
   };
-  const v = (FEEDBACK[vid]||{})[c.file] || '';
+  const fb = (FEEDBACK[vid]||{})[c.file] || {};
+  const v = fb.verdict || '', r = fb.reason || '';
   const full = (c.title || c.hook || '').trim();
   const t = splitTitle(full);
-  return `<div class="clip${v==='reject'?' rejected':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
+  return `<div class="clip${v==='reject'?' rejected':''}${v==='approve'?' approved':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
     <video src="${src}" controls preload="metadata"
       ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
@@ -791,8 +929,17 @@ function card(c, vid){
         <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
       </div>
       <div class="vote">
+        <button data-vote="approve" class="app${v==='approve'?' on-app':''}">${v==='approve'?'Approved':'Approve'}</button>
         <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Rejected':'Reject'}</button>
       </div>
+      <div class="why" hidden>
+        <textarea rows="2" placeholder="What's wrong with this clip?"></textarea>
+        <div class="whyacts">
+          <button class="btn wsubmit" disabled>Submit</button>
+          <button class="btn ghost wcancel">Cancel</button>
+        </div>
+      </div>
+      ${v==='reject'&&r?`<p class="rwhy">${esc(r)}</p>`:''}
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
 }
