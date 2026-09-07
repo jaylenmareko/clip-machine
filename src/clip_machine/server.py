@@ -24,8 +24,9 @@ from . import config, cut, modes, pipeline, transcribe
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
-_job: dict | None = None
+_jobs: list[dict] = []
 _job_lock = threading.Lock()
+_worker_alive = False
 
 
 # --------------------------------------------------------------------------
@@ -106,13 +107,13 @@ def _friendly_error(err: Exception, log: list[str]) -> str:
     return "Something went wrong. Open Details for the technical log."
 
 
-def _worker(job: dict, source: str, max_clips: int | None, use_llm: bool,
-            layout: str) -> None:
+def _run_job(job: dict) -> None:
+    """Execute one job. Called only by the single queue worker."""
     try:
         job["status"] = "running"
         with redirect_stdout(_LogWriter(job)):
-            out_dir = pipeline.run(source, max_clips=max_clips, use_llm=use_llm,
-                                   layout=layout)
+            out_dir = pipeline.run(job["source"], max_clips=job["max_clips"],
+                                   use_llm=job["use_llm"], layout=job["layout"])
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
         job["video_id"] = manifest["video_id"]
         job["clips"] = manifest["clips"]
@@ -123,22 +124,142 @@ def _worker(job: dict, source: str, max_clips: int | None, use_llm: bool,
         job["log"].append(f"ERROR  {type(e).__name__}: {e}")
 
 
+def _drain_queue() -> None:
+    """Run queued jobs one at a time until the queue is empty.
+
+    Still strictly serial - transcription is the memory bottleneck and this
+    machine OOM-kills under two at once. The queue only means a second
+    submission waits its turn instead of being rejected outright.
+    """
+    global _worker_alive
+    while True:
+        with _job_lock:
+            nxt = next((j for j in _jobs if j["status"] == "queued"), None)
+            if nxt is None:
+                _worker_alive = False
+                return
+        _run_job(nxt)
+
+
 def _start_job(source: str, max_clips: int | None, use_llm: bool,
                layout: str) -> dict:
-    global _job
+    global _worker_alive
     with _job_lock:
-        if _job and _job["status"] in ("queued", "running"):
-            return {"error": "A job is already running."}
-        _job = {
+        job = {
+            "id": len(_jobs) + 1,
             "status": "queued", "log": [], "clips": [],
             "source": source, "video_id": None, "error": None,
+            "max_clips": max_clips, "use_llm": use_llm, "layout": layout,
         }
-        threading.Thread(
-            target=_worker,
-            args=(_job, source, max_clips, use_llm, layout),
-            daemon=True,
-        ).start()
-        return {"ok": True}
+        _jobs.append(job)
+        position = sum(1 for j in _jobs if j["status"] == "queued")
+        start_worker = not _worker_alive
+        if start_worker:
+            _worker_alive = True
+
+    if start_worker:
+        threading.Thread(target=_drain_queue, daemon=True).start()
+    return {"ok": True, "queued": position}
+
+
+def _active_job() -> dict | None:
+    """The running job, else the most recent finished one."""
+    running = next((j for j in _jobs if j["status"] in ("running", "queued")), None)
+    if running:
+        return running
+    return _jobs[-1] if _jobs else None
+
+
+# --------------------------------------------------------------------------
+# keep / reject
+#
+# Two jobs at once. Immediately, it curates: rejected clips drop out of the
+# zip so "download all" means "download the good ones". Longer term it is the
+# only real signal for tuning selection - every scoring change so far came
+# from Jaylen reacting to output and me measuring against it, which does not
+# scale past one user.
+# --------------------------------------------------------------------------
+def _feedback_path(video_id: str) -> Path:
+    return config.CLIPS_DIR / video_id / "feedback.json"
+
+
+def _read_feedback(video_id: str) -> dict:
+    p = _feedback_path(video_id)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_feedback(video_id: str, file: str, verdict: str | None) -> dict:
+    data = _read_feedback(video_id)
+    if verdict in ("keep", "reject"):
+        data[file] = verdict
+    else:
+        data.pop(file, None)   # a third click clears the verdict
+    path = _feedback_path(video_id)
+    if path.parent.exists():
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    return data
+
+
+def _build_zip(video_id: str) -> Path | None:
+    """Bundle the clips (minus anything rejected) plus a titles file."""
+    import zipfile
+
+    d = (config.CLIPS_DIR / video_id).resolve()
+    if not str(d).startswith(str(config.CLIPS_DIR.resolve())) or not d.is_dir():
+        return None
+    manifest_path = d / "manifest.json"
+    if not manifest_path.exists():
+        return None
+
+    try:
+        clips = json.loads(manifest_path.read_text(encoding="utf-8")).get("clips", [])
+    except Exception:
+        return None
+
+    verdicts = _read_feedback(video_id)
+    keep = [c for c in clips if verdicts.get(c["file"]) != "reject"]
+    if not keep:
+        return None
+
+    # Written into the clip dir so repeat downloads are free. Rebuilt when a
+    # clip or a verdict is newer than the zip - otherwise rejecting a clip
+    # would silently keep shipping it.
+    zip_path = d / f"{video_id}-clips.zip"
+    newest = max(
+        [(d / c["file"]).stat().st_mtime for c in keep if (d / c["file"]).exists()]
+        + ([_feedback_path(video_id).stat().st_mtime]
+           if _feedback_path(video_id).exists() else [])
+        or [0]
+    )
+    if zip_path.exists() and zip_path.stat().st_mtime >= newest:
+        return zip_path
+
+    def mmss(s: float) -> str:
+        s = round(s)
+        return f"{s // 60}:{s % 60:02d}"
+
+    lines = [f"CLIP MACHINE - {video_id}", ""]
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
+        for n, c in enumerate(keep, 1):
+            f = d / c["file"]
+            if f.exists():
+                z.write(f, arcname=c["file"])
+            lines += [
+                f"{c['file']}   {mmss(c['duration'])}   at {mmss(c['start'])}"
+                f"   [{c.get('mode', '')}]",
+                f"   {c.get('title') or c.get('hook', '')}",
+                "",
+            ]
+        lines += ["NOTE: the transcript has no speaker labels, so a title can",
+                  "misattribute who said what. Check before posting."]
+        z.writestr("TITLES.txt", "\n".join(lines))
+    return zip_path
 
 
 def _library() -> list[dict]:
@@ -152,7 +273,8 @@ def _library() -> list[dict]:
             try:
                 m = json.loads(manifest.read_text(encoding="utf-8"))
                 out.append({"video_id": d.name, "count": len(m.get("clips", [])),
-                            "clips": m.get("clips", [])})
+                            "clips": m.get("clips", []),
+                            "feedback": _read_feedback(d.name)})
             except Exception:
                 continue
     return out
@@ -227,7 +349,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_html(_render_page())
         elif route == "/api/status":
             free = transcribe.free_ram_gb()
-            job = _job or {"status": "idle", "log": [], "clips": []}
+            job = _active_job() or {"status": "idle", "log": [], "clips": []}
+            waiting = sum(1 for j in _jobs if j["status"] == "queued")
+            if job.get("status") == "queued":
+                waiting = max(waiting - 1, 0)   # this one is next, not waiting
             self._send_json({
                 "status": job["status"],
                 "log": job["log"][-400:],
@@ -236,10 +361,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "error": job.get("error"),
                 "free_ram": round(free, 2) if free else None,
                 "model": config.WHISPER_MODEL,
+                "queued": waiting,
                 **_progress(job.get("log", [])),
             })
         elif route == "/api/library":
             self._send_json(_library())
+        elif route.startswith("/zip/"):
+            vid = urllib.parse.unquote(route[len("/zip/"):]).strip("/")
+            path = _build_zip(vid)
+            if path is None:
+                self._send_json({"error": "nothing to zip"}, 404)
+                return
+            self._send_file(path)
         elif route.startswith("/clips/"):
             rel = urllib.parse.unquote(route[len("/clips/"):])
             # contain the path inside CLIPS_DIR
@@ -252,11 +385,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
-        if urllib.parse.urlparse(self.path).path != "/api/run":
+        path = urllib.parse.urlparse(self.path).path
+        if path not in ("/api/run", "/api/feedback"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(length) or b"{}")
+
+        if path == "/api/feedback":
+            vid = (data.get("video_id") or "").strip()
+            file = (data.get("file") or "").strip()
+            verdict = data.get("verdict")
+            if not vid or not file or "/" in file or ".." in file + vid:
+                self._send_json({"error": "bad request"}, 400)
+                return
+            self._send_json({"ok": True, "feedback": _write_feedback(vid, file, verdict)})
+            return
+
         source = (data.get("source") or "").strip()
         if not source:
             self._send_json({"error": "Give it a video URL or a local file path."}, 400)
@@ -317,6 +462,17 @@ PAGE = r"""<!doctype html>
   #details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
   #details pre{margin-top:8px}
   .acts{display:flex;gap:8px;margin-top:10px}
+  .vote{display:flex;gap:8px;margin-top:8px}
+  .vote button{flex:1;background:transparent;border:1px solid var(--line);
+    color:var(--muted);border-radius:7px;padding:6px;font:600 12px/1.4 inherit;
+    cursor:pointer}
+  .vote button:hover{color:var(--text);border-color:#39435a}
+  .vote button.on-keep{background:#173226;border-color:#2c4a37;color:var(--good)}
+  .vote button.on-rej{background:#33201f;border-color:#4d2c2b;color:var(--bad)}
+  .clip.rejected{opacity:.42}
+  .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
+  .allbar .btn{flex:0 0 auto;padding:9px 16px}
+  .allbar span{color:var(--muted);font-size:12px}
   .btn{flex:1;text-align:center;background:var(--accent);color:#0a1020;border:0;
     border-radius:7px;padding:7px 10px;font:600 12px/1.4 inherit;cursor:pointer;
     text-decoration:none}
@@ -378,6 +534,10 @@ PAGE = r"""<!doctype html>
 </div>
 
 <h2>Clips</h2>
+<div class="allbar" id="allbar" hidden>
+  <a class="btn" id="dlall" href="#">Download all</a>
+  <span id="allnote"></span>
+</div>
 <div class="grid" id="clips"></div>
 <div class="empty" id="noclips">Nothing yet. Run a video above, or previous runs will show here.</div>
 
@@ -386,6 +546,45 @@ const $ = id => document.getElementById(id);
 let running = false;
 
 const AUDIO_SIGNALS = new Set(['loud','animated','fast']);
+const FEEDBACK = {};   // video_id -> {file: 'keep'|'reject'}
+let CURRENT_VID = null;
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button[data-vote]');
+  if (!b) return;
+  const card = b.closest('.clip');
+  const vid = card.dataset.vid, file = card.dataset.file;
+  const want = b.dataset.vote;
+  const now = (FEEDBACK[vid]||{})[file];
+  const verdict = now === want ? null : want;   // clicking again clears it
+  try {
+    const r = await fetch('/api/feedback', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: vid, file, verdict})
+    });
+    const j = await r.json();
+    FEEDBACK[vid] = j.feedback || {};
+    const keepBtn = card.querySelector('[data-vote=keep]');
+    const rejBtn  = card.querySelector('[data-vote=reject]');
+    const v = FEEDBACK[vid][file] || '';
+    keepBtn.className = v==='keep' ? 'on-keep' : '';
+    rejBtn.className  = v==='reject' ? 'on-rej' : '';
+    card.classList.toggle('rejected', v==='reject');
+    updateAllBar(vid);
+  } catch (err) {}
+});
+
+function updateAllBar(vid){
+  if (!vid) return;
+  CURRENT_VID = vid;
+  const fb = FEEDBACK[vid] || {};
+  const rejected = Object.values(fb).filter(x => x==='reject').length;
+  $('dlall').href = `/zip/${encodeURIComponent(vid)}`;
+  $('allnote').textContent = rejected
+    ? `${rejected} rejected clip${rejected===1?'':'s'} excluded from the zip`
+    : 'zips every clip plus a titles file';
+  $('allbar').hidden = false;
+}
 
 $('go').onclick = async () => {
   const source = $('src').value.trim();
@@ -407,7 +606,8 @@ function card(c, vid){
     s = Math.round(s||0);
     return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
   };
-  return `<div class="clip">
+  const v = (FEEDBACK[vid]||{})[c.file] || '';
+  return `<div class="clip${v==='reject'?' rejected':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
     <video src="${src}" controls preload="metadata"
       ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
@@ -417,6 +617,10 @@ function card(c, vid){
       <div class="acts">
         <a class="btn" href="${src}" download="${esc(c.file)}">Download</a>
         <button class="btn ghost" data-copy="${encodeURIComponent(c.title||c.hook||'')}">Copy title</button>
+      </div>
+      <div class="vote">
+        <button data-vote="keep" class="${v==='keep'?'on-keep':''}">Keep</button>
+        <button data-vote="reject" class="${v==='reject'?'on-rej':''}">Reject</button>
       </div>
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
@@ -433,16 +637,20 @@ document.addEventListener('click', async e => {
   } catch (err) { b.textContent = 'Copy failed'; }
 });
 
-function render(clips, vid){
+function render(clips, vid, feedback){
+  if (feedback) FEEDBACK[vid] = feedback;
   $('clips').innerHTML = clips.map(c => card(c, vid)).join('');
   $('noclips').style.display = clips.length ? 'none' : 'block';
+  if (clips.length) updateAllBar(vid);
 }
 
 async function library(){
   const lib = await (await fetch('/api/library')).json();
   if (!lib.length) return;
+  lib.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {}; });
   $('clips').innerHTML = lib.flatMap(s => s.clips.map(c => card(c, s.video_id))).join('');
   $('noclips').style.display = 'none';
+  updateAllBar(lib[0].video_id);
 }
 
 async function poll(){
@@ -459,7 +667,8 @@ async function poll(){
     if (s.status === 'running' || s.status === 'queued'){
       running = true; $('go').disabled = true;
       const eta = s.eta_min ? ` · about ${s.eta_min} min total` : '';
-      st.textContent = (s.stage || 'Starting') + '…' + eta;
+      const q = s.queued ? ` · ${s.queued} more queued` : '';
+      st.textContent = (s.stage || 'Starting') + '…' + eta + q;
       st.className = 'status run';
       $('fill').style.width = Math.max(pct, 4) + '%';
     } else if (s.status === 'done'){
