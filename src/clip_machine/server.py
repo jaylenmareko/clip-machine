@@ -597,7 +597,12 @@ PAGE = r"""<!doctype html>
   .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
   .clip video{width:100%;display:block;background:#000;aspect-ratio:9/16;object-fit:contain}
   .meta{padding:12px 13px}
-  .hook{font-weight:600;font-size:13px;margin:0 0 6px;line-height:1.4}
+  /* The title is the point of the card - it is what gets pasted into the
+     upload form - so it gets the size and weight, and the tags recede. */
+  .hook{font-weight:600;font-size:15px;margin:0 0 5px;line-height:1.35;
+    letter-spacing:-.01em;color:var(--text)}
+  .tags{margin:0 0 8px;font-size:11.5px;line-height:1.45;color:#7d8ea8;
+    word-break:break-word}
   .stats{color:var(--muted);font-size:12px;display:flex;gap:10px;flex-wrap:wrap}
   .stats b{color:var(--good);font-weight:600}
   details{margin-top:8px}
@@ -717,6 +722,19 @@ $('go').onclick = async () => {
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
 };
 
+// The title and its hashtags are one string in the manifest, and rendering
+// them as one blob is why the title didn't read as a title - it arrived as
+// "Why a four-star hotel will never have a laundry room #advice
+// #wordsofwisdom #lol" wrapped over three lines of small text. Posting needs
+// them separately anyway, so split here rather than changing the manifest -
+// this way old runs render correctly too.
+function splitTitle(s){
+  const raw = (s || '').trim();
+  const i = raw.search(/(^|\s)#\S/);
+  if (i < 0) return {text: raw, tags: ''};
+  return {text: raw.slice(0, i).trim(), tags: raw.slice(i).trim()};
+}
+
 function card(c, vid){
   const src = `/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.file)}`;
   const esc = s => (s||'').replace(/[<>&]/g,'');
@@ -725,16 +743,19 @@ function card(c, vid){
     return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
   };
   const v = (FEEDBACK[vid]||{})[c.file] || '';
+  const t = splitTitle(c.title || c.hook);
   return `<div class="clip${v==='reject'?' rejected':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
     <video src="${src}" controls preload="metadata"
       ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
-      <p class="hook">${esc(c.title || c.hook)}</p>
+      <p class="hook">${esc(t.text)}</p>
+      ${t.tags?`<p class="tags">${esc(t.tags)}</p>`:''}
       <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
       <div class="acts">
         <a class="btn" href="${src}" download="${esc(c.file)}">Download</a>
-        <button class="btn ghost" data-copy="${encodeURIComponent(c.title||c.hook||'')}">Copy title</button>
+        <button class="btn ghost" data-copy="${encodeURIComponent(t.text)}">Copy title</button>
+        ${t.tags?`<button class="btn ghost" data-copy="${encodeURIComponent(t.tags)}">Copy tags</button>`:''}
       </div>
       <div class="vote">
         <button data-vote="keep" class="${v==='keep'?'on-keep':''}">Keep</button>

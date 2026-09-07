@@ -161,10 +161,27 @@ CAPS
   Reach:         #debate #comedy #logic #philosophy #advice #wordsofwisdom
                  #crashout #lol #ism #miami #freshandfit
 - 40-95 characters BEFORE the hashtags. Sentence case apart from any caps word.
-- Name the host ("Marquett") whenever HE is the one doing the exposing,
-  asking, or calling out: "Marquett EXPOSES...", "Marquett asks...". Do not
-  write "Man EXPOSES" or "Debater EXPOSES" for the host - that is his own
-  channel, use his name.
+
+WHO SAID IT - YOU DO NOT KNOW, SO DO NOT SAY
+The transcript has NO speaker labels. It is one undifferentiated stream of
+words with no marker for who is talking, and a clip may be the host, a
+guest, or both trading lines. You therefore cannot tell who said anything.
+- NEVER put a person's name in a title as the speaker. Not the host's, not
+  a guest's, not one you infer from context. A title reading "Marquett
+  explains why he's not here to lead everybody" was written for a clip
+  where the GUEST said it, in the first person, and Marquett never spoke.
+  That is a fabricated attribution on a real person, and it is worse than
+  a vague title.
+- Only use a group descriptor ("Muslim says", "Privileged white woman
+  says") when the clip's OWN WORDS establish it - the speaker says "as a
+  Muslim" or the exchange names them. Never from the channel, the topic,
+  or a guess.
+- Default to attributing NOTHING. State the point itself: "Real loyalty
+  takes ten years to prove", not "<someone> says real loyalty...". This is
+  what the title is for anyway - the lesson, not the speaker.
+- A name may appear as the SUBJECT of the clip when the speech is about
+  them ("Even Whoopi Goldberg couldn't beat a dress code"). That is a
+  different thing from claiming they were talking.
 - Vary the tags across a batch and lean on the ones they use most. Frequency
   across their 120 titles: #shia 17, #foundationalblackamericans 11, #iran
   10, #deen 10, #palestine 9, #gaza 8, #geopolitics 7, #islam 6, #family 6.
