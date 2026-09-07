@@ -541,7 +541,7 @@ PAGE = r"""<!doctype html>
     <div>
       <label for="src">Video URL or local file path</label>
       <input id="src" placeholder="https://youtube.com/watch?v=…  or  C:\path\to\video.mp4">
-      <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass. Layout is detected from the video.</div>
+      <div class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass.</div>
     </div>
   </div>
 
@@ -551,7 +551,8 @@ PAGE = r"""<!doctype html>
     <div class="can">
       <p><b>It can act on:</b></p>
       <ul>__ACCEPTED__</ul>
-      <p><b>It cannot act on:</b> __NOT_ACCEPTED__</p>
+      <p><b>It cannot act on:</b></p>
+      <ul>__NOT_ACCEPTED__</ul>
     </div>
   </div>
 
@@ -741,8 +742,9 @@ library(); poll();
 def _render_page() -> str:
     """Render the page."""
     accepted = "".join(f"<li>{x}</li>" for x in llm.ACCEPTED_INSTRUCTIONS)
+    refused = "".join(f"<li>{x}</li>" for x in llm.NOT_ACCEPTED)
     return (PAGE.replace("__ACCEPTED__", accepted)
-                .replace("__NOT_ACCEPTED__", "; ".join(llm.NOT_ACCEPTED) + "."))
+                .replace("__NOT_ACCEPTED__", refused))
 
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
