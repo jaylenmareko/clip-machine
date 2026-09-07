@@ -4,6 +4,7 @@ Excitement is physical: the speaker gets louder and faster. We get that
 for free from ffmpeg's astats filter (no ML, no extra deps, and ffmpeg
 does the arithmetic so there's no per-sample Python loop).
 """
+import bisect
 import re
 import subprocess
 from pathlib import Path
@@ -73,6 +74,9 @@ class EnergyProfile:
     def __init__(self, timeline: list[tuple[float, float]]):
         levels = sorted(db for _, db in timeline)
         self.ok = len(levels) >= 40
+        # Lazily-built parallel arrays for bisect lookups in window().
+        self._times = None
+        self._levels = None
         if not self.ok:
             self.timeline = timeline
             self.speech = []
@@ -107,7 +111,23 @@ class EnergyProfile:
         self._dyn_dist = sorted(raw_dyn)
 
     def window(self, start: float, end: float) -> list[float]:
-        return [db for t, db in self.speech if start <= t <= end]
+        """Loudness samples inside [start, end].
+
+        Was a linear scan of the whole timeline on every call. With 17,615
+        candidate windows, and excitement() + dynamics() each calling this
+        separately for every mode, that reached ~250,000 full passes over a
+        67-minute timeline and dominated the entire selection stage - 501s
+        of CPU, most of it here. `speech` is in time order, so bisect finds
+        the slice instead.
+        """
+        if not self.speech:
+            return []
+        if self._times is None:
+            self._times = [t for t, _ in self.speech]
+            self._levels = [db for _, db in self.speech]
+        lo = bisect.bisect_left(self._times, start)
+        hi = bisect.bisect_right(self._times, end)
+        return self._levels[lo:hi]
 
     def excitement(self, start: float, end: float) -> float:
         """0..1 — how hot this window runs vs. the speaker's own baseline.
