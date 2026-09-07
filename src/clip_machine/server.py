@@ -237,26 +237,58 @@ def _feedback_path(video_id: str) -> Path:
     return config.CLIPS_DIR / video_id / "feedback.json"
 
 
-# Three states, not two: unreviewed / approved / rejected.
+# Every clip is IN by default. The only per-clip action is removing one.
 #
-# "keep" used to exist and was removed as redundant - a clip stayed unless
-# rejected, so the button asserted the default. "approve" is a different
-# claim: PUBLISH THIS. It is the scheduler's input queue, so unreviewed and
-# approved have to be distinguishable, which they were not before.
+# This is the third revision of this decision and the reasoning matters.
+# "Keep" went first: a clip stayed unless rejected, so keeping it asserted
+# the default and carried no information. Then per-clip "Approve" was added
+# for the scheduler, and it has now gone the same way for the same reason -
+# approving 15 clips one at a time to publish all 15 is 15 clicks to express
+# the default. What is left is: nothing to do if you like them, one click to
+# drop one.
 #
-# A rejection also carries a REASON. Without one the reject button is just a
-# filter on the zip; with one it becomes the only labelled data about what
-# Jaylen considers a bad clip, which is what any later "can a model review
-# this yet?" question has to be measured against.
-VERDICTS = ("approve", "reject")
+# Publishing is still an explicit human act, just BATCHED - "Schedule these
+# 13" is one deliberate confirmation for the whole set rather than fifteen.
+# Nothing reaches a social account without somebody pressing something,
+# because that is not an undoable mistake.
+#
+# "queued" therefore means the batch confirm has happened. "reject" means
+# removed, and carries an OPTIONAL reason - optional because a mandatory
+# explanation to delete a clip is the most friction in the app for a first
+# time user, and the reason is still recorded whenever it is given. Those
+# reasons are the only labelled data about what counts as a bad clip.
+VERDICTS = ("queued", "reject")
+
+
+def _manifest_starts(video_id: str) -> dict | None:
+    """{file: start_seconds} for a project, or None if unreadable."""
+    p = config.CLIPS_DIR / video_id / "manifest.json"
+    if not p.exists():
+        return None
+    try:
+        clips = json.loads(p.read_text(encoding="utf-8-sig")).get("clips", [])
+    except Exception:
+        return None
+    return {c["file"]: float(c.get("start", -1)) for c in clips if c.get("file")}
 
 
 def _read_feedback(video_id: str) -> dict:
-    """{file: {"verdict": ..., "reason": ..., "at": epoch}}
+    """{file: {"verdict": ..., "reason": ..., "at": epoch, "start": secs}}
 
     Older files stored a bare string per clip ({"clip_01.mp4": "reject"}).
     Those are normalised on read rather than migrated on disk, so an old
     project keeps working and nothing has to be rewritten.
+
+    VERDICTS ARE VALIDATED AGAINST THE MANIFEST, because clip filenames are
+    positional and a re-run overwrites them. Re-running the 67-min source
+    turned 18 clips into 16, and the five removals from the first run
+    silently re-attached themselves to four unrelated clips of the second -
+    clip_15.mp4 went from a clip Jaylen had removed to "Real leadership
+    means accepting you're not for everybody", which he had not. A verdict
+    that survives into content it was never about is worse than no verdict.
+    So a stored `start` must still match the clip at that filename, and a
+    verdict with no start (written before this check existed) cannot be
+    verified and is dropped.
     """
     p = _feedback_path(video_id)
     if not p.exists():
@@ -271,18 +303,28 @@ def _read_feedback(video_id: str) -> dict:
         return {}
     if not isinstance(raw, dict):
         return {}
+    starts = _manifest_starts(video_id)
     out = {}
     for file, v in raw.items():
+        if starts is not None:
+            if file not in starts:
+                continue                      # clip no longer exists
+            stored = v.get("start") if isinstance(v, dict) else None
+            if stored is None or abs(float(stored) - starts[file]) > 1.0:
+                continue                      # different clip, same filename
         if isinstance(v, str):
             # "keep" predates approve and meant only "not rejected", which
             # is the unreviewed default - so it is dropped, not upgraded to
             # an approval the user never gave.
             if v == "reject":
                 out[file] = {"verdict": "reject", "reason": "", "at": 0}
-        elif isinstance(v, dict) and v.get("verdict") in VERDICTS:
-            out[file] = {"verdict": v["verdict"],
+        elif isinstance(v, dict) and v.get("verdict") in VERDICTS + ("approve",):
+            # 'approve' was the per-clip form of today's batch confirm.
+            verdict = "queued" if v["verdict"] == "approve" else v["verdict"]
+            out[file] = {"verdict": verdict,
                          "reason": str(v.get("reason", ""))[:2000],
-                         "at": int(v.get("at", 0) or 0)}
+                         "at": int(v.get("at", 0) or 0),
+                         "start": float(v.get("start", -1))}
     return out
 
 
@@ -290,9 +332,12 @@ def _write_feedback(video_id: str, file: str, verdict: str | None,
                     reason: str = "") -> dict:
     data = _read_feedback(video_id)
     if verdict in VERDICTS:
+        # Stamp WHICH clip this was about, not just which filename.
+        starts = _manifest_starts(video_id) or {}
         data[file] = {"verdict": verdict,
                       "reason": (reason or "").strip()[:2000],
-                      "at": int(time.time())}
+                      "at": int(time.time()),
+                      "start": starts.get(file, -1)}
     else:
         data.pop(file, None)   # clicking the active verdict clears it
     path = _feedback_path(video_id)
@@ -384,8 +429,8 @@ def _library() -> list[dict]:
             "total_seconds": round(sum(c.get("duration", 0) for c in clips)),
             "rejected": sum(1 for v in feedback.values()
                             if v.get("verdict") == "reject"),
-            "approved": sum(1 for v in feedback.values()
-                            if v.get("verdict") == "approve"),
+            "queued": sum(1 for v in feedback.values()
+                          if v.get("verdict") == "queued"),
         })
     return out
 
@@ -501,7 +546,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
-        if path not in ("/api/run", "/api/feedback"):
+        if path not in ("/api/run", "/api/feedback", "/api/queue"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -518,6 +563,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True,
                              "feedback": _write_feedback(vid, file, verdict,
                                                          reason)})
+            return
+
+        if path == "/api/queue":
+            # Batch confirm: mark every clip that has NOT been removed as
+            # queued. One call rather than one per clip, because it is one
+            # decision - and because fifteen separate writes to the same
+            # file would race each other.
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "bad request"}, 400)
+                return
+            manifest_path = config.CLIPS_DIR / vid / "manifest.json"
+            if not manifest_path.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                clips = json.loads(
+                    manifest_path.read_text(encoding="utf-8-sig")).get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            now = int(time.time())
+            for c in clips:
+                if fb.get(c["file"], {}).get("verdict") != "reject":
+                    fb[c["file"]] = {"verdict": "queued", "reason": "",
+                                     "at": now,
+                                     "start": float(c.get("start", -1))}
+            fp = _feedback_path(vid)
+            if fp.parent.exists():
+                fp.write_text(json.dumps(fb, indent=2), encoding="utf-8")
+            queued = sum(1 for v in fb.values() if v["verdict"] == "queued")
+            self._send_json({"ok": True, "feedback": fb, "queued": queued})
             return
 
         source = (data.get("source") or "").strip()
@@ -620,18 +698,12 @@ PAGE = r"""<!doctype html>
   /* Keep was removed - a clip is kept unless it is rejected, so the button
      asserted a state that was already the default. Reject is the only verdict
      now, and it reads red rather than neutral-grey. */
-  .vote button.app{color:var(--good);border-color:#2c4a37}
-  .vote button.app:hover{background:#16261d;border-color:#3d6a4d;color:var(--good)}
-  .vote button.on-app{background:var(--good);border-color:var(--good);
-    color:#08130c;font-weight:600}
-  .vote button.on-app:hover{background:#3f9e6a;border-color:#3f9e6a;color:#08130c}
-  .vote button.rej{color:var(--bad);border-color:#4d2c2b}
-  .vote button.rej:hover{background:#2a1a1a;border-color:#6b3a38;color:var(--bad)}
-  .vote button.on-rej{background:var(--bad);border-color:var(--bad);color:#fff;
+  .vote button.rej{color:var(--muted);border-color:transparent;font-weight:500}
+  .vote button.rej:hover{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a}
+  .vote button.on-rej{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a;
     font-weight:600}
-  .vote button.on-rej:hover{background:#c2413f;border-color:#c2413f;color:#fff}
   .clip.rejected{opacity:.42}
-  .clip.approved{border-color:#2c4a37;box-shadow:inset 0 0 0 1px #2c4a3755}
+  .clip.queued{border-color:#2c4a37;box-shadow:inset 0 0 0 1px #2c4a3755}
   /* The reason box only appears once Reject is pressed - the verdict is not
      sent until Submit, so a mis-click costs nothing. */
   .why{margin-top:8px}
@@ -642,8 +714,6 @@ PAGE = r"""<!doctype html>
   .whyacts{display:flex;gap:8px;margin-top:6px}
   .whyacts .btn{padding:6px;border:1px solid transparent}
   .whyacts .btn:disabled{opacity:.4;cursor:not-allowed}
-  .rwhy{margin:7px 0 0;font-size:11.5px;line-height:1.45;color:#c78b88;
-    border-left:2px solid #4d2c2b;padding-left:8px}
   .proj{background:var(--panel);border:1px solid var(--line);border-radius:12px;
     margin-top:14px;overflow:hidden}
   .proj>summary{cursor:pointer;padding:14px 16px;display:flex;align-items:baseline;
@@ -659,8 +729,15 @@ PAGE = r"""<!doctype html>
   .pdate{color:var(--muted)}
   .ptime{color:#6c7a90}
   .pkindx{color:var(--accent)}
-  .pbar{display:flex;align-items:center;gap:12px;padding:0 16px 4px}
+  .phow{margin:0;padding:2px 16px 10px;color:var(--muted);font-size:12.5px}
+  .pbar{display:flex;align-items:center;gap:12px;padding:0 16px 4px;
+    flex-wrap:wrap}
   .pbar .btn{flex:0 0 auto;padding:7px 14px}
+  .pbar .sched{background:var(--good);color:#08130c;font-weight:600}
+  .pbar .sched:hover{background:#3f9e6a}
+  .pbar .sched.done{background:transparent;color:var(--good);
+    border:1px solid #2c4a37}
+  .pbar .sched:disabled{opacity:.5;cursor:default}
   .pnote{color:var(--muted);font-size:12px}
   .proj .grid{padding:12px 16px 16px}
   .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
@@ -779,7 +856,8 @@ PAGE = r"""<!doctype html>
 
 <h2>Library</h2>
 <div id="projects"></div>
-<div class="empty" id="noclips">Nothing yet. Run a video above, or previous runs will show here.</div>
+<div class="empty" id="noclips">Paste a link to a long video above. You'll get
+  vertical clips, each with a title and description ready to post.</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -796,16 +874,9 @@ document.addEventListener('click', async e => {
   const vid = card.dataset.vid, file = card.dataset.file;
   const want = b.dataset.vote;
   const now = ((FEEDBACK[vid]||{})[file]||{}).verdict || '';
-
-  // Rejecting asks WHY first. The reason is the whole point of the button -
-  // a bare reject is just a zip filter, a reason is the only record of what
-  // counts as a bad clip - so the verdict is not sent until Submit.
-  if (want === 'reject' && now !== 'reject') {
-    const why = card.querySelector('.why');
-    why.hidden = false;
-    why.querySelector('textarea').focus();
-    return;
-  }
+  // Removing is INSTANT and the note comes after. Demanding an explanation
+  // before you may delete a clip is the most friction in the app for a
+  // first-time user; the note still gets recorded whenever it is given.
   await sendVerdict(card, now === want ? null : want, '');
 });
 
@@ -826,72 +897,76 @@ async function sendVerdict(card, verdict, reason){
 function paintVerdict(card, vid, file){
   const fb = (FEEDBACK[vid]||{})[file] || {};
   const v = fb.verdict || '';
-  const appBtn = card.querySelector('[data-vote=approve]');
   const rejBtn = card.querySelector('[data-vote=reject]');
-  appBtn.className = v==='approve' ? 'app on-app' : 'app';
-  appBtn.textContent = v==='approve' ? 'Approved' : 'Approve';
   rejBtn.className = v==='reject' ? 'rej on-rej' : 'rej';
-  rejBtn.textContent = v==='reject' ? 'Rejected' : 'Reject';
+  rejBtn.textContent = v==='reject' ? 'Removed · undo' : 'Remove';
   card.classList.toggle('rejected', v==='reject');
-  card.classList.toggle('approved', v==='approve');
+  card.classList.toggle('queued', v==='queued');
 
+  // The note box only exists for a removed clip, and keeps whatever was
+  // written so a decision made last week still explains itself.
   const why = card.querySelector('.why');
-  why.hidden = true;
-  const ta = why.querySelector('textarea');
-  ta.value = '';
-  why.querySelector('.wsubmit').disabled = true;
-
-  // Show the recorded reason under a rejected clip, so a decision made
-  // last week still explains itself.
-  let note = card.querySelector('.rwhy');
-  if (v === 'reject' && fb.reason) {
-    if (!note) {
-      note = document.createElement('p');
-      note.className = 'rwhy';
-      why.after(note);
-    }
-    note.textContent = fb.reason;
-  } else if (note) {
-    note.remove();
-  }
+  why.hidden = v !== 'reject';
+  why.querySelector('textarea').value = fb.reason || '';
 }
 
-// Submit / Cancel inside the reason box, and the enabled state of Submit.
-document.addEventListener('input', e => {
-  const ta = e.target.closest('.why textarea');
-  if (!ta) return;
-  ta.closest('.why').querySelector('.wsubmit').disabled = !ta.value.trim();
-});
-
+// "Save note" attaches a reason to an already-removed clip.
 document.addEventListener('click', async e => {
-  const cancel = e.target.closest('.why .wcancel');
-  if (cancel) {
-    const why = cancel.closest('.why');
-    why.hidden = true;
-    why.querySelector('textarea').value = '';
-    why.querySelector('.wsubmit').disabled = true;
-    return;
-  }
   const submit = e.target.closest('.why .wsubmit');
-  if (!submit || submit.disabled) return;
+  if (!submit) return;
   const why = submit.closest('.why');
+  const was = submit.textContent;
   await sendVerdict(submit.closest('.clip'), 'reject',
                     why.querySelector('textarea').value.trim());
+  submit.textContent = 'Saved';
+  setTimeout(() => { submit.textContent = was; }, 1200);
+});
+
+// Batch confirm. One decision for the whole project, so one request - and
+// fifteen separate writes to the same feedback file would race each other.
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button[data-queue]');
+  if (!b) return;
+  const vid = b.dataset.queue;
+  b.disabled = true;
+  try {
+    const r = await fetch('/api/queue', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: vid})
+    });
+    const j = await r.json();
+    if (j.feedback) FEEDBACK[vid] = j.feedback;
+    document.querySelectorAll(`.clip[data-vid="${vid}"]`).forEach(card => {
+      paintVerdict(card, vid, card.dataset.file);
+    });
+    updateAllBar(vid);
+  } catch (err) {}
+  b.disabled = false;
 });
 
 function updateAllBar(vid){
   // Refresh just this project's note - how many clips the zip will skip.
   const fb = FEEDBACK[vid] || {};
   const vals = Object.values(fb);
-  const rejected = vals.filter(x => x.verdict==='reject').length;
-  const approved = vals.filter(x => x.verdict==='approve').length;
+  const removed = vals.filter(x => x.verdict==='reject').length;
+  const queued = vals.filter(x => x.verdict==='queued').length;
+  const cards = document.querySelectorAll(`.clip[data-vid="${vid}"]`).length;
+  const keeping = Math.max(cards - removed, 0);
+
+  const btn = document.querySelector(`button[data-queue="${vid}"]`);
+  if (btn) {
+    btn.textContent = queued
+      ? `${queued} clip${queued===1?'':'s'} queued`
+      : `Schedule ${keeping} clip${keeping===1?'':'s'}`;
+    btn.classList.toggle('done', !!queued);
+  }
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
   if (!note) return;
   const bits = [];
-  if (approved) bits.push(`${approved} approved`);
-  if (rejected) bits.push(`${rejected} rejected, excluded from the zip`);
-  note.textContent = bits.length ? bits.join(' · ')
-                                 : 'zips every clip plus a titles file';
+  if (removed) bits.push(`${removed} removed`);
+  bits.push(queued ? 'waiting for a platform to be connected'
+                   : 'nothing is posted until you schedule');
+  note.textContent = bits.join(' · ');
 }
 
 $('go').onclick = async () => {
@@ -944,17 +1019,14 @@ function card(c, vid){
         <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
       </div>
       <div class="vote">
-        <button data-vote="approve" class="app${v==='approve'?' on-app':''}">${v==='approve'?'Approved':'Approve'}</button>
-        <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Rejected':'Reject'}</button>
+        <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Removed · undo':'Remove'}</button>
       </div>
-      <div class="why" hidden>
-        <textarea rows="2" placeholder="What's wrong with this clip?"></textarea>
+      <div class="why"${v==='reject'?'':' hidden'}>
+        <textarea rows="2" placeholder="Why? (optional)">${esc(r)}</textarea>
         <div class="whyacts">
-          <button class="btn wsubmit" disabled>Submit</button>
-          <button class="btn ghost wcancel">Cancel</button>
+          <button class="btn ghost wsubmit">Save note</button>
         </div>
       </div>
-      ${v==='reject'&&r?`<p class="rwhy">${esc(r)}</p>`:''}
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
 }
@@ -987,9 +1059,12 @@ function projectFolder(s, open){
         ${s.mode==='compilation'?'<span class="pkindx">compilation</span>':''}
       </span>
     </summary>
+    <p class="phow">Every clip below is included. Remove any you don't want,
+      then schedule the rest.</p>
     <div class="pbar">
-      <a class="btn" href="/zip/${encodeURIComponent(s.video_id)}">Download all</a>
-      <span class="pnote" data-vid="${esc(s.video_id)}">${rejected?`${rejected} rejected, excluded from the zip`:'zips every clip plus a titles file'}</span>
+      <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
+      <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Download all</a>
+      <span class="pnote" data-vid="${esc(s.video_id)}"></span>
     </div>
     <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
   </details>`;
@@ -1001,6 +1076,7 @@ function renderLibrary(sets, expand){
     .map((s, i) => projectFolder(s, expand ? s.video_id === expand : i === 0))
     .join('');
   $('noclips').style.display = sets.length ? 'none' : 'block';
+  sets.forEach(s => updateAllBar(s.video_id));
 }
 
 async function library(expand){
