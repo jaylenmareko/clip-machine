@@ -537,8 +537,6 @@ PAGE = r"""<!doctype html>
 
 <header>
   <h1>Clip Machine</h1>
-  <span class="sub">longform &rarr; vertical clips, fully local</span>
-  <span class="badge" id="ram">&nbsp;</span>
 </header>
 
 <div class="panel">
@@ -699,11 +697,6 @@ async function library(){
 async function poll(){
   try{
     const s = await (await fetch('/api/status')).json();
-    if (s.free_ram != null){
-      const low = s.free_ram < 2.5;
-      $('ram').textContent = `${s.free_ram} GB RAM free · ${s.model}`;
-      $('ram').className = 'badge' + (low ? ' warn' : '');
-    }
     const st = $('status');
     if (s.status !== 'idle') $('runpanel').hidden = false;
     const pct = s.steps ? Math.round(100 * (s.step||0) / s.steps) : 0;
