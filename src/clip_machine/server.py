@@ -535,8 +535,21 @@ PAGE = r"""<!doctype html>
   .prog.err .pct{color:var(--bad)}
   #details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
   #details pre{margin-top:8px}
-  .acts{display:flex;gap:8px;margin-top:10px}
-  .desc{margin:0 0 9px;font-size:12.5px;line-height:1.5;color:#a8b6cc}
+  .acts{display:flex;margin-top:10px}
+  /* Download and Reject are a stacked pair now, so they have to match
+     exactly: same padding, and a transparent 1px border to answer Reject's
+     real one, or the two sit 2px different in height. */
+  .acts .dl{flex:1 1 auto;text-align:center;padding:6px;
+    border:1px solid transparent}
+  /* Deliberately NOT line-clamped. A fixed line count only aligns at one
+     viewport width - descriptions run 234-291 chars, which is 6 lines on a
+     wide card and 8 on a narrow one, so any clamp that fits one truncates
+     the other. Instead .stats carries margin-top:auto, so everything from
+     the stats row down is pinned to the bottom of the card; the grid
+     already stretches sibling cards to equal height, so those rows line up
+     across the row at every width and the description absorbs the slack. */
+  .desc{margin:0 0 9px;font-size:12.5px;line-height:1.5;color:#a8b6cc;
+    min-height:calc(2 * 1.5em)}
   .vote{display:flex;gap:8px;margin-top:8px}
   .vote button{flex:1;background:transparent;border:1px solid var(--line);
     color:var(--muted);border-radius:7px;padding:6px;font:600 12px/1.4 inherit;
@@ -578,7 +591,6 @@ PAGE = r"""<!doctype html>
     text-decoration:none}
   .btn.ghost{background:transparent;color:var(--muted);border:1px solid var(--line)}
   .btn.ghost:hover{color:var(--text);border-color:#39435a}
-  .btn.ok{background:var(--good);color:#0a1020}
   .kind{background:#26304a;border:1px solid #35406090;color:#a9c0ee;
     border-radius:5px;padding:1px 7px;font-size:11px;letter-spacing:.03em}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
@@ -609,16 +621,22 @@ PAGE = r"""<!doctype html>
     max-height:320px;overflow:auto;font:12px/1.6 ui-monospace,Consolas,monospace;
     color:#c6d0e0;white-space:pre-wrap;margin:0}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
-  .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    overflow:hidden;display:flex;flex-direction:column}
   .clip video{width:100%;display:block;background:#000;aspect-ratio:9/16;object-fit:contain}
-  .meta{padding:12px 13px}
+  .meta{padding:12px 13px;display:flex;flex-direction:column;flex:1 1 auto}
+  /* Fixed-height text rows: this is what makes every card's stats and
+     buttons land on the same line as its neighbours'. */
+  .clamp{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden}
   /* The title is the point of the card - it is what gets pasted into the
      upload form - so it gets the size and weight, and the tags recede. */
   .hook{font-weight:600;font-size:15px;margin:0 0 5px;line-height:1.35;
-    letter-spacing:-.01em;color:var(--text)}
+    letter-spacing:-.01em;color:var(--text);
+    height:calc(3 * 1.35em);-webkit-line-clamp:3}
   .tags{margin:0 0 8px;font-size:11.5px;line-height:1.45;color:#7d8ea8;
-    word-break:break-word}
-  .stats{color:var(--muted);font-size:12px;display:flex;gap:10px;flex-wrap:wrap}
+    word-break:break-word;height:calc(2 * 1.45em);-webkit-line-clamp:2}
+  .stats{color:var(--muted);font-size:12px;display:flex;gap:10px;
+    align-items:center;min-height:22px;margin-top:auto}
   .stats b{color:var(--good);font-weight:600}
   details{margin-top:8px}
   summary{cursor:pointer;color:var(--muted);font-size:12px}
@@ -764,15 +782,13 @@ function card(c, vid){
     <video src="${src}" controls preload="metadata"
       ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
-      <p class="hook">${esc(t.text)}</p>
-      ${t.tags?`<p class="tags">${esc(t.tags)}</p>`:''}
-      ${c.description?`<p class="desc">${esc(c.description)}</p>`:''}
+      <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
+      <p class="tags clamp" title="${esc(t.tags)}">${esc(t.tags)}</p>
+      <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}</p>
       <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
       <div class="acts">
-        <a class="btn" href="${src}" download="${esc(c.file)}">Download</a>
-        <button class="btn ghost" data-copy="${encodeURIComponent(full)}">Copy title</button>
-        ${c.description?`<button class="btn ghost" data-copy="${encodeURIComponent(c.description)}">Copy description</button>`:''}
+        <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
       </div>
       <div class="vote">
         <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Rejected':'Reject'}</button>
@@ -780,17 +796,6 @@ function card(c, vid){
       <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
 }
-
-document.addEventListener('click', async e => {
-  const b = e.target.closest('button[data-copy]');
-  if (!b) return;
-  try {
-    await navigator.clipboard.writeText(decodeURIComponent(b.dataset.copy));
-    const was = b.textContent;
-    b.textContent = 'Copied'; b.classList.add('ok');
-    setTimeout(() => { b.textContent = was; b.classList.remove('ok'); }, 1200);
-  } catch (err) { b.textContent = 'Copy failed'; }
-});
 
 // A project is one source video. Native <details> does the collapsing, so
 // there is no toggle state to manage and it stays keyboard-accessible.
