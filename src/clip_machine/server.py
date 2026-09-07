@@ -480,7 +480,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Clip Machine</title>
+<title>ClipYourVideos.com</title>
 <style>
   :root{
     --bg:#0d0f14; --panel:#151922; --line:#242b38; --text:#e8ecf4;
@@ -492,6 +492,10 @@ PAGE = r"""<!doctype html>
   .wrap{max-width:1080px;margin:0 auto;padding:28px 20px 64px}
   header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px}
   h1{font-size:20px;margin:0;letter-spacing:-.02em}
+  /* Wordmark. The .com is set lighter so the name reads first and the
+     domain trails it, rather than the two competing at one weight. */
+  .brand{font-size:23px;font-weight:700;letter-spacing:-.03em}
+  .brand .tld{font-weight:500;color:var(--muted);letter-spacing:-.02em}
   .sub{color:var(--muted);font-size:13px}
   .badge{margin-left:auto;font-size:12px;color:var(--muted);
     border:1px solid var(--line);border-radius:999px;padding:3px 10px}
@@ -615,7 +619,9 @@ PAGE = r"""<!doctype html>
 </style></head><body><div class="wrap">
 
 <header>
-  <h1>Clip Machine</h1>
+  <!-- The wordmark IS the domain, per Jaylen. No separate mark: the name
+       already says what the product does, so a logo would only decorate it. -->
+  <h1 class="brand">ClipYourVideos<span class="tld">.com</span></h1>
 </header>
 
 <div class="panel">
@@ -623,7 +629,6 @@ PAGE = r"""<!doctype html>
     <div>
       <div class="labelrow">
         <label for="src">Video URL or local file path</label>
-        <span class="hint">Finds hot takes, heated exchanges, admissions, stories, funny beats and clear explanations — in one pass.</span>
       </div>
       <input id="src" placeholder="https://youtube.com/watch?v=…  or  C:\path\to\video.mp4">
     </div>
@@ -957,7 +962,7 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
 def main() -> None:
     config.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
     url = f"http://127.0.0.1:{PORT}"
-    print(f"Clip Machine UI  ->  {url}")
+    print(f"ClipYourVideos.com  ->  {url}")
     free = transcribe.free_ram_gb()
     if free:
         print(f"Free RAM: {free:.1f} GB  (model default: {config.WHISPER_MODEL})")

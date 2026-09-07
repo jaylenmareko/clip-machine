@@ -1,4 +1,4 @@
-# Clip Machine
+# ClipYourVideos.com
 
 Longform video in → vertical, clip-ready shorts out. Runs entirely on your machine. No API keys, no subscription, no per-video cost.
 

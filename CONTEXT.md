@@ -1,4 +1,4 @@
-# Clip Machine — CONTEXT.md
+# ClipYourVideos.com — CONTEXT.md
 
 ## Stage
 MVP build — pipeline written, render path verified, transcription verified. Not yet run end-to-end on a real longform video.
