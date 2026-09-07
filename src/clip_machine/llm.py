@@ -56,10 +56,10 @@ MAX_CANDIDATE_CHARS = 700
 # can touch, and an instruction quietly half-ignored is worse than a UI that
 # says up front what it handles.
 ACCEPTED_INSTRUCTIONS = [
-    'Topics to include — "only the parts about Gaza"',
-    'Topics to skip — "skip anything about the Talmud"',
-    'Kind of moment — "focus on where he gets challenged", "only funny bits"',
-    'Title style — "no hashtags", "titles under 60 characters", "don\'t use my name"',
+    "Topics to include",
+    "Topics to skip",
+    "Kind of moment",
+    "Title style",
 ]
 NOT_ACCEPTED = [
     "clip length or how many clips (both scored automatically)",
