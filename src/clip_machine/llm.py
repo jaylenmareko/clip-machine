@@ -16,6 +16,11 @@ import json
 import os
 import re
 
+# Imported for its side effect: config loads ~/.config/clip-machine/.env into
+# the environment. Without it, using this module standalone fails with
+# "Could not resolve authentication method" even though the key is on disk.
+from . import config  # noqa: F401
+
 # Haiku 4.5, chosen on measurement rather than assumption. A/B'd against
 # Sonnet 5 on an identical 21-candidate shortlist:
 #
@@ -55,6 +60,102 @@ these clips carry no captions.
 
 Return ONLY the ranked candidate numbers, best first. Drop candidates that fail
 any of 1-3, even if that means returning fewer than asked."""
+
+
+# Title formula extracted from ~55 real titles across the reference channels
+# (@TheSaintandTheSinner, @MARQUETTFORWOMEN, @MarquettOnBusiness).
+_TITLE_SYSTEM = """You write titles for short-form debate/podcast clips, in one
+specific house style. Match it exactly.
+
+THE FORMULA
+  [group descriptor] + [says / admits / claims / LIES] + [the claim]  -> hashtags
+
+RULES
+- Attribute the claim to a DESCRIPTOR, never a personal name: "Muslim says",
+  "Rabbi says", "Privileged white woman says", "Pakistani man says".
+- EXACTLY ONE word in ALL CAPS for emphasis. Pick from: LIES, NOT, EXPOSES,
+  FLAMED, BROKE, NEVER, ADMITS, DODGES, TRAITORS, HELL. One. Never two.
+- Optional outcome tease ("and gets FLAMED", "gets EXPOSED") or comment bait
+  ("Agree?", "Agree or disagree?", "What should we do?") - use sparingly.
+- 3-6 hashtags, mixing identity tags (#shia #deen #islam #quran #gaza
+  #palestine #foundationalblackamericans) with reach tags (#debate #comedy
+  #redpill #hypocrisy #logic).
+- 40-95 characters BEFORE the hashtags. Sentence case apart from the caps word.
+- Name the host ("Marquett") only when HE is the actor: "Marquett EXPOSES...".
+- State what actually happens in the clip. Do not invent claims that are not
+  in the transcript, and do not exaggerate beyond it.
+
+Ignore transcription errors - the transcript is a machine index. If a proper
+noun is clearly garbled ("designists" for Zionists, "jibriya" for Jibreel),
+use the correct spelling.
+
+Return ONLY JSON: {"titles": {"<clip number>": "<title with hashtags>", ...}}"""
+
+
+def title_clips(clips: list[dict]) -> dict[int, str] | None:
+    """Generate a house-style title per clip. Returns {index: title} or None."""
+    if not clips:
+        return None
+    try:
+        import anthropic
+    except ImportError:
+        return None
+
+    listing = "\n\n".join(
+        f"[{n}] ({c['duration']:.0f}s) {c['text'][:900]}"
+        for n, c in enumerate(clips)
+    )
+    prompt = (
+        f"Write one title for each of these {len(clips)} clips.\n\n{listing}\n\n"
+        'Return ONLY JSON: {"titles": {"0": "...", "1": "...", ...}}'
+    )
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=4096,
+            system=_TITLE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if getattr(response, "stop_reason", None) == "refusal":
+            print("      (Claude declined to write titles)")
+            return None
+
+        text = "".join(
+            b.text for b in response.content if getattr(b, "type", None) == "text"
+        )
+        try:
+            data = json.loads(text)
+        except Exception:
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                return None
+            data = json.loads(m.group(0))
+
+        titles = data.get("titles") if isinstance(data, dict) else None
+        if not isinstance(titles, dict):
+            return None
+
+        out: dict[int, str] = {}
+        for k, v in titles.items():
+            try:
+                idx = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(clips) and isinstance(v, str) and v.strip():
+                out[idx] = v.strip()
+
+        used = getattr(response, "usage", None)
+        if used is not None:
+            print(f"      titled by {MODEL} "
+                  f"({used.input_tokens} in / {used.output_tokens} out)")
+        return out or None
+
+    except Exception as e:
+        detail = " ".join(str(e).split())[:200]
+        print(f"      (titles unavailable: {type(e).__name__}: {detail})")
+        return None
 
 
 def _extract_picks(text: str, n: int) -> list[int]:

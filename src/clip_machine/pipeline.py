@@ -9,7 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import audio_features, config, cut, download, modes, score, transcribe
+from . import audio_features, config, cut, download, llm, modes, score, transcribe
 
 
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
@@ -59,6 +59,11 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     # than speedup, because libx264 already saturates the CPU and extra
     # ffmpeg processes just contend. Raise CLIP_RENDER_WORKERS on a machine
     # with real headroom; here it only adds OOM risk.
+    # House-style titles for the final picks; falls back to the hook line.
+    titles = llm.title_clips(clips) or {}
+    for i, c in enumerate(clips):
+        c["title_text"] = titles.get(i) or c["hook"]
+
     workers = max(1, int(os.environ.get("CLIP_RENDER_WORKERS", "1")))
     print(f"[5/6] Rendering {config.OUT_WIDTH}x{config.OUT_HEIGHT} clips"
           f"{f' ({workers} in parallel)' if workers > 1 else ''}...")
@@ -69,14 +74,14 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
         print(f"      -> clip_{n:02d}.mp4  "
               f"({c['duration']:.0f}s @ {c['start']:.0f}s)  "
-              f"[{','.join(c.get('signals', [])) or 'no signals'}]  "
-              f"\"{c['hook'][:44]}\"")
+              f"{c.get('title_text', c['hook'])[:72]}")
         return {
             "file": clip_path.name,
             "start": round(c["start"], 2),
             "end": round(c["end"], 2),
             "duration": round(c["duration"], 2),
             "score": round(c["score"], 2),
+            "title": c.get("title_text", c["hook"]),
             "hook": c["hook"],
             "signals": c.get("signals", []),
             "base": c.get("base"),

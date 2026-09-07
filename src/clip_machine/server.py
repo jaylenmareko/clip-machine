@@ -341,16 +341,14 @@ $('go').onclick = async () => {
 
 function card(c, vid){
   const src = `/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.file)}`;
-  const chips = (c.signals||[]).map(s =>
-    `<span class="chip${AUDIO_SIGNALS.has(s)?' aud':''}">${s.replace(/[<>&]/g,'')}</span>`).join('');
+  const esc = s => (s||'').replace(/[<>&]/g,'');
   return `<div class="clip">
     <video src="${src}" controls preload="metadata"></video>
     <div class="meta">
-      <p class="hook">${(c.hook||'').replace(/[<>&]/g,'')}</p>
+      <p class="hook">${esc(c.title || c.hook)}</p>
       <div class="stats"><span>${c.duration}s</span><span>@${Math.round(c.start)}s</span>
-        <span>score <b>${c.score}</b></span>${c.mode?`<span class="kind">${c.mode}</span>`:''}</div>
-      ${chips?`<div class="chips">${chips}</div>`:''}
-      <details><summary>transcript</summary><p>${(c.transcript||'').replace(/[<>&]/g,'')}</p></details>
+        ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
+      <details><summary>transcript</summary><p>${esc(c.transcript)}</p></details>
     </div></div>`;
 }
 
