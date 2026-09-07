@@ -10,12 +10,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from . import (audio_features, config, cut, download, layout as layout_detect,
-               llm, modes, score, transcribe)
+               llm, looks, modes, score, transcribe)
 
 
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         mode: str = "auto", layout: str = "auto",
-        instructions: str | None = None) -> Path:
+        instructions: str | None = None,
+        look: str | None = None) -> Path:
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
@@ -86,11 +87,13 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     # with real headroom; here it only adds OOM risk.
     workers = max(1, int(os.environ.get("CLIP_RENDER_WORKERS", "1")))
     print(f"[5/6] Rendering {config.OUT_WIDTH}x{config.OUT_HEIGHT} clips"
+          f" [{look or config.LOOK}]"
           f"{f' ({workers} in parallel)' if workers > 1 else ''}...")
 
     def render_one(n: int, c: dict) -> dict:
         clip_path = out_dir / f"clip_{n:02d}.mp4"
-        cut.render_clip(video_path, c["start"], c["end"], clip_path, layout=layout)
+        cut.render_clip(video_path, c["start"], c["end"], clip_path,
+                        layout=layout, look=look)
         thumb = cut.make_thumbnail(clip_path, out_dir / f"clip_{n:02d}.jpg")
 
         print(f"      -> clip_{n:02d}.mp4  "
@@ -145,6 +148,8 @@ def main() -> None:
                    help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
                    help="skip Claude reranking, use heuristics only")
+    p.add_argument("--look", default=None, choices=list(looks.LOOKS),
+                   help=f"picture treatment (default {config.LOOK})")
     p.add_argument("--say", default=None, dest="instructions",
                    help="plain-English steer, e.g. \"only the Gaza parts\"")
     p.add_argument("--mode", default="auto", choices=["auto"] + list(modes.MODES),
@@ -155,7 +160,7 @@ def main() -> None:
     args = p.parse_args()
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
         mode=args.mode, layout=args.layout,
-        instructions=args.instructions)
+        instructions=args.instructions, look=args.look)
 
 
 if __name__ == "__main__":

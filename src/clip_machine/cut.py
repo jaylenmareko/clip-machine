@@ -18,7 +18,7 @@ way and QSV pays for frame upload/download.
 import subprocess
 from pathlib import Path
 
-from . import config
+from . import config, looks
 
 LAYOUTS = ("center", "split")
 
@@ -64,15 +64,21 @@ def render_clip(
     out_path: Path,
     layout: str = "center",
     size: tuple[int, int] | None = None,
+    look: str | None = None,
 ) -> Path:
     w, h = size or (config.OUT_WIDTH, config.OUT_HEIGHT)
     duration = end - start
 
+    # Picture treatment rides on the end of the same pass - no second encode.
+    treat = looks.filters(look or config.LOOK, w, h)
+    tail = f",{treat}" if treat else ""
+
     if layout == "split":
-        filter_args = ["-filter_complex", _split(w, h) + ";[stacked]null[v]",
+        stacked = f"[stacked]{treat}[v]" if treat else "[stacked]null[v]"
+        filter_args = ["-filter_complex", _split(w, h) + ";" + stacked,
                        "-map", "[v]", "-map", "0:a?"]
     else:
-        filter_args = ["-vf", _center(w, h)]
+        filter_args = ["-vf", _center(w, h) + tail]
 
     subprocess.run(
         [
@@ -82,6 +88,10 @@ def render_clip(
             "-t", f"{duration:.3f}",
             *filter_args,
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            # Pinned: colortemperature and friends output yuv444p, which
+            # encodes as High 4:4:4 Predictive and will not play in
+            # Windows Movies & TV.
+            "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
             "-r", "30",
             "-movflags", "+faststart",

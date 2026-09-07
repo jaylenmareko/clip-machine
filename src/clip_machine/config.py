@@ -49,6 +49,10 @@ BATCH_SIZE = int(os.environ.get("CLIP_BATCH_SIZE", "8"))
 OLLAMA_URL = os.environ.get("CLIP_OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("CLIP_OLLAMA_MODEL", "llama3.2:3b")
 
+# --- picture treatment ---
+# See looks.py. "nostalgia" is the look Jaylen picked, one step dialled back.
+LOOK = os.environ.get("CLIP_LOOK", "nostalgia")
+
 # --- how many clips ---
 # OpusClip produces 15-30 clips from a long video (one reported 25 from a
 # 30-minute upload), and critically it does NOT charge per clip - it bills
