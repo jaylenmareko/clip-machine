@@ -273,20 +273,31 @@ def _build_zip(video_id: str) -> Path | None:
 
 
 def _library() -> list[dict]:
-    """Previously generated clip sets, newest first."""
+    """Every project, newest first. One entry per source video."""
     out = []
     if not config.CLIPS_DIR.exists():
         return out
     for d in sorted(config.CLIPS_DIR.iterdir(), key=lambda p: -p.stat().st_mtime):
         manifest = d / "manifest.json"
-        if d.is_dir() and manifest.exists():
-            try:
-                m = json.loads(manifest.read_text(encoding="utf-8"))
-                out.append({"video_id": d.name, "count": len(m.get("clips", [])),
-                            "clips": m.get("clips", []),
-                            "feedback": _read_feedback(d.name)})
-            except Exception:
-                continue
+        if not (d.is_dir() and manifest.exists()):
+            continue
+        try:
+            m = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        clips = m.get("clips", [])
+        feedback = _read_feedback(d.name)
+        out.append({
+            "video_id": d.name,
+            "count": len(clips),
+            "clips": clips,
+            "feedback": feedback,
+            "source": m.get("source", ""),
+            "mode": m.get("mode", ""),
+            "created": int(d.stat().st_mtime),
+            "total_seconds": round(sum(c.get("duration", 0) for c in clips)),
+            "rejected": sum(1 for v in feedback.values() if v == "reject"),
+        })
     return out
 
 
@@ -481,6 +492,21 @@ PAGE = r"""<!doctype html>
   .vote button.on-keep{background:#173226;border-color:#2c4a37;color:var(--good)}
   .vote button.on-rej{background:#33201f;border-color:#4d2c2b;color:var(--bad)}
   .clip.rejected{opacity:.42}
+  .proj{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    margin-top:14px;overflow:hidden}
+  .proj>summary{cursor:pointer;padding:14px 16px;display:flex;align-items:baseline;
+    gap:14px;flex-wrap:wrap;list-style:none}
+  .proj>summary::-webkit-details-marker{display:none}
+  .proj>summary::before{content:'B8';color:var(--muted);font-size:11px;
+    transition:transform .15s ease;display:inline-block}
+  .proj[open]>summary::before{transform:rotate(90deg)}
+  .proj>summary:hover{background:#181d27}
+  .pname{font-weight:600;font-size:13px;word-break:break-all;flex:1 1 auto}
+  .pmeta{color:var(--muted);font-size:12px;white-space:nowrap}
+  .pbar{display:flex;align-items:center;gap:12px;padding:0 16px 4px}
+  .pbar .btn{flex:0 0 auto;padding:7px 14px}
+  .pnote{color:var(--muted);font-size:12px}
+  .proj .grid{padding:12px 16px 16px}
   .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
   .allbar .btn{flex:0 0 auto;padding:9px 16px}
   .allbar span{color:var(--muted);font-size:12px}
@@ -519,7 +545,7 @@ PAGE = r"""<!doctype html>
   pre{background:#0a0d13;border:1px solid var(--line);border-radius:8px;padding:14px;
     max-height:320px;overflow:auto;font:12px/1.6 ui-monospace,Consolas,monospace;
     color:#c6d0e0;white-space:pre-wrap;margin:0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px;margin-top:16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
   .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
   .clip video{width:100%;display:block;background:#000;aspect-ratio:9/16;object-fit:contain}
   .meta{padding:12px 13px}
@@ -574,12 +600,8 @@ PAGE = r"""<!doctype html>
   <details id="details"><summary>Details</summary><pre id="log"></pre></details>
 </div>
 
-<h2>Clips</h2>
-<div class="allbar" id="allbar" hidden>
-  <a class="btn" id="dlall" href="#">Download all</a>
-  <span id="allnote"></span>
-</div>
-<div class="grid" id="clips"></div>
+<h2>Library</h2>
+<div id="projects"></div>
 <div class="empty" id="noclips">Nothing yet. Run a video above, or previous runs will show here.</div>
 
 <script>
@@ -616,15 +638,13 @@ document.addEventListener('click', async e => {
 });
 
 function updateAllBar(vid){
-  if (!vid) return;
-  CURRENT_VID = vid;
+  // Refresh just this project's note - how many clips the zip will skip.
   const fb = FEEDBACK[vid] || {};
   const rejected = Object.values(fb).filter(x => x==='reject').length;
-  $('dlall').href = `/zip/${encodeURIComponent(vid)}`;
-  $('allnote').textContent = rejected
-    ? `${rejected} rejected clip${rejected===1?'':'s'} excluded from the zip`
+  const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
+  if (note) note.textContent = rejected
+    ? `${rejected} rejected, excluded from the zip`
     : 'zips every clip plus a titles file';
-  $('allbar').hidden = false;
 }
 
 $('go').onclick = async () => {
@@ -678,20 +698,45 @@ document.addEventListener('click', async e => {
   } catch (err) { b.textContent = 'Copy failed'; }
 });
 
-function render(clips, vid, feedback){
-  if (feedback) FEEDBACK[vid] = feedback;
-  $('clips').innerHTML = clips.map(c => card(c, vid)).join('');
-  $('noclips').style.display = clips.length ? 'none' : 'block';
-  if (clips.length) updateAllBar(vid);
+// A project is one source video. Native <details> does the collapsing, so
+// there is no toggle state to manage and it stays keyboard-accessible.
+function projectFolder(s, open){
+  const esc = t => (t||'').replace(/[<>&]/g,'');
+  const clock = n => {
+    n = Math.round(n||0);
+    return `${Math.floor(n/60)}:${String(n%60).padStart(2,'0')}`;
+  };
+  const when = new Date((s.created||0) * 1000).toLocaleString([], {
+    month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+  // A URL is the useful name; a local path is only useful as its filename.
+  const src = s.source || '';
+  const name = /^https?:/i.test(src) ? src : (src.split(/[\\/]/).pop() || s.video_id);
+  const rejected = Object.values(s.feedback||{}).filter(x => x==='reject').length;
+
+  return `<details class="proj" ${open?'open':''}>
+    <summary>
+      <span class="pname">${esc(name)}</span>
+      <span class="pmeta">${s.count} clip${s.count===1?'':'s'} · ${clock(s.total_seconds)} · ${esc(when)}${s.mode==='compilation'?' · compilation':''}</span>
+    </summary>
+    <div class="pbar">
+      <a class="btn" href="/zip/${encodeURIComponent(s.video_id)}">Download all</a>
+      <span class="pnote" data-vid="${esc(s.video_id)}">${rejected?`${rejected} rejected, excluded from the zip`:'zips every clip plus a titles file'}</span>
+    </div>
+    <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
+  </details>`;
 }
 
-async function library(){
+function renderLibrary(sets, expand){
+  sets.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {}; });
+  $('projects').innerHTML = sets
+    .map((s, i) => projectFolder(s, expand ? s.video_id === expand : i === 0))
+    .join('');
+  $('noclips').style.display = sets.length ? 'none' : 'block';
+}
+
+async function library(expand){
   const lib = await (await fetch('/api/library')).json();
-  if (!lib.length) return;
-  lib.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {}; });
-  $('clips').innerHTML = lib.flatMap(s => s.clips.map(c => card(c, s.video_id))).join('');
-  $('noclips').style.display = 'none';
-  updateAllBar(lib[0].video_id);
+  renderLibrary(lib, expand);
 }
 
 async function poll(){
@@ -712,7 +757,9 @@ async function poll(){
       st.className = 'status done';
       $('fill').style.width = '100%';
       $('go').disabled = false;
-      if (running){ render(s.clips, s.video_id); running = false; }
+      // Reload the whole library so the finished run appears as a project
+      // folder, expanded, rather than as a detached grid.
+      if (running){ library(s.video_id); running = false; }
     } else if (s.status === 'error'){
       st.textContent = s.error || 'Something went wrong.';
       st.className = 'status err';
