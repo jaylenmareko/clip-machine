@@ -27,7 +27,28 @@ class Mode:
     w_dynamics: float = 0.0                     # acoustic variation
     w_rate: float = 0.0                         # faster-than-usual speech
     lexicon_cap: float = 4.0                    # ceiling on stacked lexical hits
+    # Which of this mode's signals actually make a clip THIS KIND of moment,
+    # as opposed to merely being about the same subject matter.
+    #
+    # Measured on a 67-minute interview: 12 of 22 clips came back labelled
+    # "debate" and only 2 of those had a conflict signal. The rest won the
+    # label on `money-take`, `gender-take` and `absolutes` - i.e. on the
+    # words "money", "broke", "men", "never", "always", which show up in any
+    # ordinary conversation about life. One was a story about Whoopi
+    # Goldberg being turned away from a restaurant, labelled a debate purely
+    # because someone said "never".
+    #
+    # Subject matter is not moment type. Topic signals still add score - a
+    # money argument IS more clippable - but they cannot name the clip.
+    # Empty means every signal counts as identifying.
+    identifying: tuple[str, ...] = ()
     _compiled: list = field(default_factory=list, repr=False)
+
+    def identifies(self, fired: list[str]) -> bool:
+        """Did anything fire that makes this clip genuinely this kind?"""
+        if not self.identifying:
+            return bool(fired)
+        return any(f in self.identifying for f in fired)
 
     def compiled(self):
         if not self._compiled:
@@ -68,6 +89,10 @@ _CONTROVERSIAL = Mode(
     w_excite=1.5,
     w_dynamics=0.5,
     lexicon_cap=5.5,
+    # Taking a stance against something makes a clip controversial. Merely
+    # mentioning a scandal word ("fired", "sued") does not.
+    identifying=("disagreement", "against-consensus", "calling-out",
+                 "prescriptive"),
 )
 
 _EXCITING = Mode(
@@ -115,6 +140,9 @@ _DEBATE = Mode(
     w_dynamics=1.5,
     w_rate=1.0,
     lexicon_cap=6.0,
+    # A debate needs someone pushing back or going after somebody. Talking
+    # ABOUT money, gender or absolutes is just conversation.
+    identifying=("pushback", "status-attack"),
 )
 
 _FUNNY = Mode(
@@ -143,20 +171,45 @@ _STORY = Mode(
     w_excite=0.5,
     w_dynamics=0.5,
     lexicon_cap=4.5,
+    # "I was", "I felt" is how everyone talks. A story needs an opening or a
+    # sequence of events.
+    identifying=("narrative-open", "sequence"),
 )
 
 _EDUCATIONAL = Mode(
     key="educational",
-    label="Educational",
-    blurb="Clear explanation, steps, concrete numbers",
+    label="Lesson",
+    blurb="A point taught — explanation, principle, hard-won rule",
     patterns=[
         ("explains", r"\b(the reason (is|why)|this is how|here'?s how|the key is"
                      r"|which means|what that means)\b", 2.5),
+        # The original three patterns only caught FORMAL teaching - "here's
+        # how", "step 1", "40 percent". A long-form interview teaches in
+        # none of those shapes; it teaches in maxims. On a 67-minute episode
+        # made almost entirely of life lessons, exactly ONE clip out of 22
+        # came back labelled educational, and 12 came back "debate". The
+        # lesson vocabulary below is how the wisdom actually sounds.
+        ("principle", r"\b(the thing about|what people don'?t (realize|understand|get)"
+                      r"|most people (don'?t|never)|you have to understand"
+                      r"|understand something|the difference between"
+                      r"|that'?s (what|how) (real|true)|at the end of the day)\b", 2.5),
+        ("conditional-rule", r"\b(if you (can'?t|don'?t|want)|if somebody|when you"
+                             r"|the moment you|once you)\b.{0,80}?"
+                             r"\b(you'?ll|you will|you can'?t|it'?s|then)\b", 2.0),
+        ("earned", r"\b(i learned|taught me|the lesson|what i realized"
+                   r"|took me (years|a long time)|the hard way"
+                   r"|i coined the phrase|my (father|mother|pops|dad) (said|told)"
+                   r"|there'?s a saying)\b", 2.5),
+        ("defines", r"\b(that'?s not|it'?s not (about|a)|isn'?t (about|a))\b"
+                    r".{0,60}?\b(it'?s|that'?s)\b", 1.5),
         ("enumerates", r"\b(first,|second,|third,|three (things|ways|reasons|steps)"
                        r"|step \d|number one|two things)\b", 2.0),
         ("data", r"(\b\d+\s?(%|percent)\b|\$\s?\d)", 1.5),
     ],
-    lexicon_cap=4.5,
+    lexicon_cap=5.5,
+    # Numbers alone are not a lesson - a dollar figure shows up in any story.
+    identifying=("explains", "principle", "conditional-rule", "earned",
+                 "defines", "enumerates"),
 )
 
 _BALANCED = Mode(
