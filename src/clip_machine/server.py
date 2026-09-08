@@ -21,7 +21,7 @@ import webbrowser
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import config, cut, llm, modes, pipeline, transcribe
+from . import config, cut, llm, modes, pipeline, publish, transcribe
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -526,6 +526,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
         elif route == "/api/library":
             self._send_json(_library())
+        elif route.startswith("/bundle/"):
+            vid = urllib.parse.unquote(route[len("/bundle/"):]).strip("/")
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "bad request"}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                data = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            # Only what was actually confirmed. Bundling everything would
+            # make the Schedule button a no-op and quietly publish clips the
+            # user removed.
+            picked = [c for c in data.get("clips", [])
+                      if fb.get(c["file"], {}).get("verdict") == "queued"]
+            if not picked:
+                self._send_json({"error": "nothing is queued for this project"}, 400)
+                return
+            path = publish.bundle(vid, picked, data.get("source", ""),
+                                  config.CLIPS_DIR / vid)
+            self._send_file(path)
+            return
         elif route.startswith("/zip/"):
             vid = urllib.parse.unquote(route[len("/zip/"):]).strip("/")
             path = _build_zip(vid)
@@ -946,6 +973,7 @@ document.addEventListener('click', async e => {
       paintVerdict(card, vid, card.dataset.file);
     });
     updateAllBar(vid);
+    if (j.queued) window.location = `/bundle/${encodeURIComponent(vid)}`;
   } catch (err) {}
   b.disabled = false;
 });
@@ -966,11 +994,14 @@ function updateAllBar(vid){
       : `Schedule ${keeping} clip${keeping===1?'':'s'}`;
     btn.classList.toggle('done', !!queued);
   }
+  const bundle = document.querySelector(`a[data-bundle="${vid}"]`);
+  if (bundle) bundle.hidden = !queued;
+
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
   if (!note) return;
   const bits = [];
   if (removed) bits.push(`${removed} removed`);
-  if (queued) bits.push('waiting for a platform to be connected');
+  if (queued) bits.push('bundle has the clips plus titles and descriptions');
   note.textContent = bits.join(' · ');
 }
 
@@ -1068,7 +1099,9 @@ function projectFolder(s, open){
       want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
-      <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Download all</a>
+      <a class="btn ghost bundle" href="/bundle/${encodeURIComponent(s.video_id)}"
+         data-bundle="${esc(s.video_id)}" hidden>Download bundle</a>
+      <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Just the videos</a>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
     </div>
     <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
