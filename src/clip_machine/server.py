@@ -729,7 +729,10 @@ PAGE = r"""<!doctype html>
   .pdate{color:var(--muted)}
   .ptime{color:#6c7a90}
   .pkindx{color:var(--accent)}
-  .phow{margin:0;padding:2px 16px 10px;color:var(--muted);font-size:12.5px}
+  .phow{margin:0 16px 12px;padding:10px 13px;font-size:13.5px;line-height:1.5;
+    color:var(--text);background:#16223a;border:1px solid #2b3c5c;
+    border-left:3px solid var(--accent);border-radius:8px}
+  .phow b{color:var(--accent);font-weight:600}
   .pbar{display:flex;align-items:center;gap:12px;padding:0 16px 4px;
     flex-wrap:wrap}
   .pbar .btn{flex:0 0 auto;padding:7px 14px}
@@ -777,7 +780,10 @@ PAGE = r"""<!doctype html>
   pre{background:#0a0d13;border:1px solid var(--line);border-radius:8px;padding:14px;
     max-height:320px;overflow:auto;font:12px/1.6 ui-monospace,Consolas,monospace;
     color:#c6d0e0;white-space:pre-wrap;margin:0}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
+  .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}
+  @media (max-width:1180px){ .grid{grid-template-columns:repeat(3,minmax(0,1fr))} }
+  @media (max-width:860px){  .grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+  @media (max-width:560px){  .grid{grid-template-columns:1fr} }
   .clip{background:var(--panel);border:1px solid var(--line);border-radius:12px;
     overflow:hidden;display:flex;flex-direction:column}
   .clip video{width:100%;display:block;background:#000;aspect-ratio:9/16;object-fit:contain}
@@ -964,8 +970,7 @@ function updateAllBar(vid){
   if (!note) return;
   const bits = [];
   if (removed) bits.push(`${removed} removed`);
-  bits.push(queued ? 'waiting for a platform to be connected'
-                   : 'nothing is posted until you schedule');
+  if (queued) bits.push('waiting for a platform to be connected');
   note.textContent = bits.join(' · ');
 }
 
@@ -1059,8 +1064,8 @@ function projectFolder(s, open){
         ${s.mode==='compilation'?'<span class="pkindx">compilation</span>':''}
       </span>
     </summary>
-    <p class="phow">Every clip below is included. Remove any you don't want,
-      then schedule the rest.</p>
+    <p class="phow">Every clip below is included. <b>Remove</b> any you don't
+      want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
       <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Download all</a>
