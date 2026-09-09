@@ -13,13 +13,16 @@ TWO THINGS TO KNOW BEFORE TRUSTING IT
    yours. check_quota_budget() below turns that into a plain refusal
    instead of a 403 halfway through a batch.
 
-2. PRIVACY. An app whose OAuth consent screen has not been verified by
-   Google may have its uploads forced to `private` regardless of what is
-   requested. That is not something this code can detect in advance, so
-   upload() reads the privacy status BACK off the API response and records
-   what actually happened rather than what was asked for. If the ledger
-   says `private` when you asked for `public`, that is the verification
-   gate, not a bug here.
+2. PRIVACY. The worry was that an app whose OAuth consent screen Google
+   has not verified would have uploads forced to `private` regardless of
+   what was requested. MEASURED 2026-09-09 on an unverified app in testing
+   mode: asked for `private`, got `private` - so the response honours the
+   request and public posting does not appear to require verification
+   first. Still worth reading back rather than assuming, because that is a
+   policy that can change without notice, so upload() records the privacy
+   status the API RETURNED, not the one it was given. A ledger row saying
+   `private` after asking for `public` would be the verification gate
+   appearing, not a bug here.
 
 Secrets: the client secrets JSON and the stored token live under
 ~/.config/clip-machine/, outside the repo and outside OneDrive, because the
