@@ -810,11 +810,23 @@ PAGE = r"""<!doctype html>
   /* Already on YouTube: recede it, because the decision is made and the
      card is now a record rather than something to act on. Not as faded as
      a removed clip - this one is a success. */
-  .clip.onair{opacity:.72;border-color:#2b3c5c}
-  .clip.onair:hover{opacity:1}
-  .clip.onair video{filter:saturate(.85)}
-  .onair-tag{margin:0 0 7px;font-size:11px;font-weight:600;
-    letter-spacing:.02em;color:#7fb2ff;text-transform:uppercase}
+  .clip.onair{border-color:#2b3c5c}
+  .media{position:relative}
+  /* A stamp across the middle of the frame, because a small line of text
+     in the metadata was missable - and missing "this already went out" is
+     how a clip gets posted twice. pointer-events:none so the player still
+     works underneath, and it fades on hover so it never blocks watching. */
+  .stamp{position:absolute;inset:0;display:flex;flex-direction:column;
+    align-items:center;justify-content:center;gap:6px;pointer-events:none;
+    background:#070a12b0;transition:opacity .18s;text-align:center;padding:14px}
+  .clip:hover .stamp{opacity:.12}
+  .stamp b{font-size:19px;font-weight:800;letter-spacing:.06em;
+    line-height:1.15;color:#fff;text-shadow:0 2px 10px #000a}
+  .stamp span{font-size:12px;color:#dfe6f2;text-shadow:0 1px 6px #000a}
+  .stamp.soon b{color:#7fb2ff}
+  .stamp.done b{color:#5fd08a}
+  .stamp.bad  b{color:#e8615e}
+  .stamp.priv b{color:#d9a13a}
   /* The reason box only appears once Reject is pressed - the verdict is not
      sent until Submit, so a mis-click costs nothing. */
   .why{margin-top:8px}
@@ -1343,14 +1355,22 @@ function splitTitle(s){
 // A clip already on YouTube must read differently at a glance. Without
 // that the grid gives no way to tell what has gone out, which is how six
 // accidental uploads sat unnoticed among sixteen identical cards.
-function pubLabel(p){
-  if (!p) return '';
-  if (p.status !== 'posted') return 'Upload failed';
-  if (!p.publish_at) return 'On YouTube · private';
+function pubState(p){
+  if (!p || p.status !== 'posted') return 'bad';
+  if (!p.publish_at) return 'priv';
+  return new Date(p.publish_at) > new Date() ? 'soon' : 'done';
+}
+function pubWord(p){
+  return {bad:'FAILED', priv:'ON YOUTUBE', soon:'SCHEDULED',
+          done:'PUBLISHED'}[pubState(p)];
+}
+function pubWhen(p){
+  const st = pubState(p);
+  if (st === 'bad') return 'upload did not complete';
+  if (st === 'priv') return 'private, no publish date';
   const d = new Date(p.publish_at);
-  const when = d.toLocaleString([], {weekday:'short', day:'numeric',
-    month:'short', hour:'numeric', minute:'2-digit'});
-  return (d > new Date() ? 'Scheduled ' : 'Published ') + when;
+  return d.toLocaleString([], {weekday:'short', day:'numeric', month:'short',
+    hour:'numeric', minute:'2-digit'});
 }
 
 function card(c, vid){
@@ -1367,10 +1387,13 @@ function card(c, vid){
   const full = (c.title || c.hook || '').trim();
   const t = splitTitle(full);
   return `<div class="clip${v==='reject'?' rejected':''}${v==='queued'?' queued':''}${live?' onair':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
-    <video src="${src}" controls preload="metadata"
-      ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
+    <div class="media">
+      <video src="${src}" controls preload="metadata"
+        ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
+      ${live?`<div class="stamp ${pubState(pub)}">
+        <b>${pubWord(pub)}</b><span>${pubWhen(pub)}</span></div>`:''}
+    </div>
     <div class="meta">
-      ${live?`<p class="onair-tag">${pubLabel(pub)}</p>`:''}
       <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
       <p class="tags clamp" title="${esc(t.tags)}">${esc(t.tags)}</p>
       <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}</p>
