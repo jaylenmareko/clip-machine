@@ -29,6 +29,7 @@ Secrets: the client secrets JSON and the stored token live under
 school tenant syncs everything in the project tree.
 """
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config, publish
@@ -142,12 +143,21 @@ def check_quota_budget(n: int) -> tuple[bool, str]:
 
 def upload(clip_path: Path, title: str, description: str,
            privacy: str = "private", video_id: str = "",
-           clip_id: str = "", tags: list[str] | None = None) -> dict:
+           clip_id: str = "", tags: list[str] | None = None,
+           publish_at=None) -> dict:
     """Upload one clip. Records the outcome in the ledger either way.
 
     Defaults to `private` on purpose: a mistake that is visible to the
     world is not undoable, and flipping a video public afterwards takes one
     click. Nothing here posts publicly unless asked to.
+
+    `publish_at` (a timezone-aware datetime) is how scheduling actually
+    works, and it is why YouTube needs no cloud worker: the video uploads
+    private now and YOUTUBE flips it public at that moment, so this machine
+    only has to be awake long enough to upload. The API requires
+    privacyStatus stay `private` for publishAt to be honoured - set
+    anything else and the schedule is silently dropped, so it is forced
+    here rather than trusted to the caller.
     """
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
@@ -168,10 +178,18 @@ def upload(clip_path: Path, title: str, description: str,
             "categoryId": "22",            # People & Blogs
         },
         "status": {
-            "privacyStatus": privacy,
+            "privacyStatus": "private" if publish_at else privacy,
             "selfDeclaredMadeForKids": False,
         },
     }
+    if publish_at is not None:
+        # RFC 3339, UTC. A naive datetime would be interpreted as UTC by
+        # the API and publish at the wrong hour, so require an offset.
+        if publish_at.tzinfo is None:
+            raise ValueError("publish_at must be timezone-aware")
+        body["status"]["publishAt"] = (
+            publish_at.astimezone(timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     try:
         youtube = build("youtube", "v3", credentials=_credentials(),
@@ -193,9 +211,96 @@ def upload(clip_path: Path, title: str, description: str,
 
     vid = response.get("id", "")
     url = f"https://youtube.com/shorts/{vid}" if vid else None
+    scheduled = (response.get("status") or {}).get("publishAt")
     # What Google ACTUALLY set, not what we asked for - an unverified app
     # can have this forced to private, and the ledger should say so.
     got = (response.get("status") or {}).get("privacyStatus", "unknown")
+    note = f"privacy={got}"
+    if scheduled:
+        note += f" publishAt={scheduled}"
     publish.record(video_id, cid, clip_path.name, "youtube", "posted",
-                   url=url, note=f"privacy={got}")
-    return {"id": vid, "url": url, "privacy": got, "asked_for": privacy}
+                   url=url, note=note)
+    return {"id": vid, "url": url, "privacy": got, "asked_for": privacy,
+            "publish_at": scheduled}
+
+
+# --------------------------------------------------------------------------
+# scheduling
+#
+# The quota limit is on UPLOADS, not on publish times: six videos can leave
+# this machine per day, but their publishAt can be spread over as many days
+# as you like. So a 14-clip batch is three days of uploading and two weeks
+# of posting - and it is worth saying that out loud rather than letting the
+# seventh upload fail.
+# --------------------------------------------------------------------------
+DEFAULT_HOUR = 18          # 6pm local reads as evening-scroll time
+DEFAULT_PER_DAY = 1
+
+
+def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
+               hour: int = DEFAULT_HOUR, start_days: int = 1,
+               tz=None) -> list:
+    """Publish times for n clips: `per_day` each day, from tomorrow.
+
+    Starts tomorrow, not today: a clip scheduled for 6pm when it is already
+    7pm would be rejected by the API as a time in the past, and silently
+    publishing it immediately instead would be worse.
+    """
+    tz = tz or datetime.now().astimezone().tzinfo
+    now = datetime.now(tz)
+    base = (now + timedelta(days=start_days)).replace(
+        hour=hour, minute=0, second=0, microsecond=0)
+    out = []
+    for i in range(n):
+        day, slot = divmod(i, max(1, per_day))
+        # Space same-day slots evenly through the evening rather than
+        # stacking them on the same minute.
+        t = base + timedelta(days=day, hours=slot * 2)
+        if t <= now:
+            t = now + timedelta(minutes=20)
+        out.append(t)
+    return out
+
+
+def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
+                   per_day: int = DEFAULT_PER_DAY, hour: int = DEFAULT_HOUR,
+                   privacy_after: str = "public") -> dict:
+    """Upload as many clips as today's quota allows, each with a publish time.
+
+    Returns what happened, including what did NOT fit - a scheduler that
+    quietly drops half a batch is worse than one that says so.
+    """
+    already = publish.posted_pairs()
+    todo = []
+    for c in clips:
+        cid = publish.clip_id(video_id, c.get("start", -1))
+        if (cid, "youtube") in already:
+            continue                      # never post the same clip twice
+        todo.append((cid, c))
+
+    used = uploads_today()
+    room = max(0, MAX_UPLOADS_PER_DAY - used)
+    batch, deferred = todo[:room], todo[room:]
+
+    times = plan_times(len(batch), per_day=per_day, hour=hour)
+    done, failed = [], []
+    for (cid, c), when in zip(batch, times):
+        path = clip_dir / c["file"]
+        try:
+            res = upload(path, c.get("title", "")[:100],
+                         c.get("description", ""), privacy="private",
+                         video_id=video_id, clip_id=cid, publish_at=when)
+            done.append({"file": c["file"], "url": res["url"],
+                         "publish_at": res.get("publish_at"),
+                         "title": c.get("title", "")})
+        except Exception as e:
+            failed.append({"file": c["file"],
+                           "error": f"{type(e).__name__}: {e}"[:200]})
+
+    return {
+        "scheduled": done,
+        "failed": failed,
+        "deferred": [c["file"] for _, c in deferred],
+        "already_posted": len(clips) - len(todo),
+        "quota": f"{used + len(done)} of {MAX_UPLOADS_PER_DAY} uploads used today",
+    }

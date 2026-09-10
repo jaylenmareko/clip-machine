@@ -21,7 +21,8 @@ import webbrowser
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import config, cut, llm, modes, pipeline, publish, transcribe
+from . import (config, cut, llm, modes, pipeline, publish, transcribe,
+               youtube)
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -575,7 +576,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
-        if path not in ("/api/run", "/api/feedback", "/api/queue"):
+        if path not in ("/api/run", "/api/feedback", "/api/queue",
+                        "/api/youtube"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -592,6 +594,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True,
                              "feedback": _write_feedback(vid, file, verdict,
                                                          reason)})
+            return
+
+        if path == "/api/youtube":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "bad request"}, 400)
+                return
+            if not youtube.configured():
+                self._send_json({"error": "YouTube is not connected yet."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                clips = json.loads(
+                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            # Only clips the user actually confirmed. Anything removed, or
+            # never queued, is not this function's business.
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") == "queued"]
+            if not picked:
+                self._send_json({"error": "Nothing is queued for this project."}, 400)
+                return
+            try:
+                per_day = max(1, min(6, int(data.get("per_day") or 1)))
+                hour = max(0, min(23, int(data.get("hour") or 18)))
+            except (TypeError, ValueError):
+                per_day, hour = 1, 18
+            # Uploading is slow and blocking; the browser waits on it. Fine
+            # for six clips, and simpler than a second job queue.
+            result = youtube.schedule_batch(
+                picked, config.CLIPS_DIR / vid, vid,
+                per_day=per_day, hour=hour)
+            self._send_json(result)
             return
 
         if path == "/api/queue":
@@ -839,6 +880,11 @@ PAGE = r"""<!doctype html>
   .stats{color:var(--muted);font-size:12px;display:flex;gap:10px;
     align-items:center;min-height:22px;margin-top:auto}
   .stats b{color:var(--good);font-weight:600}
+  /* The clip's LENGTH is the number you scan for when picking what to post,
+     so it stops being muted grey next to the source timestamp. */
+  .dur{background:#1b2434;border:1px solid var(--line);color:var(--text);
+    font-weight:600;border-radius:5px;padding:2px 7px;font-variant-numeric:tabular-nums}
+  .from{color:var(--muted)}
   details{margin-top:8px}
   summary{cursor:pointer;color:var(--muted);font-size:12px}
   details p{color:var(--muted);font-size:12px;margin:8px 0 0;max-height:150px;overflow:auto}
@@ -968,6 +1014,40 @@ document.addEventListener('click', async e => {
   setTimeout(() => { submit.textContent = was; }, 1200);
 });
 
+// Upload the queued clips to YouTube, each with a publish time. YouTube
+// itself flips them public at that moment, which is why none of this needs
+// a server: the laptop only has to be awake long enough to upload.
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button[data-yt]');
+  if (!b) return;
+  const vid = b.dataset.yt;
+  const was = b.textContent;
+  b.disabled = true; b.textContent = 'Uploading…';
+  try {
+    const r = await fetch('/api/youtube', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: vid, per_day: 1, hour: 18})
+    });
+    const j = await r.json();
+    const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
+    if (j.error) {
+      if (note) note.textContent = j.error;
+      b.textContent = was;
+    } else {
+      const n = (j.scheduled || []).length;
+      const bits = [`${n} scheduled on YouTube`];
+      if (j.deferred && j.deferred.length)
+        bits.push(`${j.deferred.length} waiting for tomorrow's quota`);
+      if (j.failed && j.failed.length) bits.push(`${j.failed.length} failed`);
+      if (j.already_posted) bits.push(`${j.already_posted} already posted`);
+      if (note) note.textContent = bits.join(' · ');
+      b.textContent = n ? `${n} scheduled` : was;
+      console.log('youtube', j);
+    }
+  } catch (err) { b.textContent = was; }
+  b.disabled = false;
+});
+
 // Batch confirm. One decision for the whole project, so one request - and
 // fifteen separate writes to the same feedback file would race each other.
 document.addEventListener('click', async e => {
@@ -1009,6 +1089,8 @@ function updateAllBar(vid){
   }
   const bundle = document.querySelector(`a[data-bundle="${vid}"]`);
   if (bundle) bundle.hidden = !queued;
+  const yt = document.querySelector(`button[data-yt="${vid}"]`);
+  if (yt) yt.hidden = !queued;
 
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
   if (!note) return;
@@ -1063,7 +1145,8 @@ function card(c, vid){
       <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
       <p class="tags clamp" title="${esc(t.tags)}">${esc(t.tags)}</p>
       <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}</p>
-      <div class="stats"><span>${clock(c.duration)}</span><span>at ${clock(c.start)}</span>
+      <div class="stats"><span class="dur">${clock(c.duration)}</span>
+        <span class="from">from ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
       <div class="acts">
         <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
@@ -1113,6 +1196,7 @@ function projectFolder(s, open){
       want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
+      <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube</button>
       <a class="btn ghost bundle" href="/bundle/${encodeURIComponent(s.video_id)}"
          data-bundle="${esc(s.video_id)}" hidden>Download bundle</a>
       <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Just the videos</a>
