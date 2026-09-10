@@ -1046,7 +1046,7 @@ PAGE = r"""<!doctype html>
         <option value="8">8 hours</option>
         <option value="24">day</option>
       </select></label>
-      <label>from <input id="ythour" type="time" value="09:00"></label>
+      <label>starting at <input id="ythour" type="time" value="09:00"></label>
     </div>
     <p class="ytsum" id="ytsum">Working it out…</p>
     <ol class="ytlist" id="ytlist"></ol>
