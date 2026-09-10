@@ -41,13 +41,39 @@ WORK_DIR = Path(os.environ.get(
     Path(os.environ.get("LOCALAPPDATA", Path.home() / ".cache")) / "clip-machine" / "work",
 ))
 
+# --- captions ---
+# Off by default. Burning them in costs almost nothing - measured +0.5s on a
+# 35s clip, +5% - because the word timings come free with the transcript.
+# What captions actually change is what the transcript IS. See below.
+CAPTIONS = os.environ.get("CLIP_CAPTIONS", "0") not in ("0", "", "false", "no")
+
 # --- transcription (local, faster-whisper) ---
 # tiny.en / base.en / small.en / medium.en — bigger = better + slower.
-# tiny.en. There are no captions, so the transcript is an INDEX, not output:
-# nobody ever reads these words. Transcription errors ("designists" for
-# Zionists) never reach a viewer. The model only has to be good enough to
-# locate moments and match scoring phrases.
+#
+# WITHOUT captions, tiny.en: the transcript is an INDEX, not output, and
+# nobody ever reads these words. Errors ("designists" for Zionists) never
+# reach a viewer. The model only has to locate moments and match scoring
+# phrases.
 WHISPER_MODEL = os.environ.get("CLIP_WHISPER_MODEL", "tiny.en")
+#
+# WITH captions, that argument collapses - the words go on screen. tiny.en
+# produced "Are you open floor? That's beautiful." on a real clip: harmless
+# in an index, embarrassing burned into a video. So captions pull the model
+# up. base.en measured 11.0x -> 7.5x realtime here, i.e. a 67-minute source
+# goes from 6 minutes to 9. THAT is the price of captions; the rendering is
+# free.
+CAPTION_MODEL = os.environ.get("CLIP_CAPTION_MODEL", "base.en")
+
+
+def transcribe_model(captions: bool | None = None) -> str:
+    """Which Whisper model this run should use."""
+    want_caps = CAPTIONS if captions is None else captions
+    # An explicit CLIP_WHISPER_MODEL always wins - someone who set it meant it.
+    if os.environ.get("CLIP_WHISPER_MODEL"):
+        return WHISPER_MODEL
+    return CAPTION_MODEL if want_caps else WHISPER_MODEL
+
+
 WHISPER_THREADS = int(os.environ.get("CLIP_WHISPER_THREADS", "8"))
 # Batched inference: ~2.5x faster than sequential on CPU, same word
 # timestamps. Set to 1 to disable. Larger batches use more RAM, which is

@@ -17,7 +17,7 @@ way and QSV pays for frame upload/download.
 import subprocess
 from pathlib import Path
 
-from . import config, looks
+from . import captions, config, looks
 
 LAYOUTS = ("center", "split")
 
@@ -47,6 +47,7 @@ def render_clip(
     size: tuple[int, int] | None = None,
     look: str | None = None,
     radius: int | None = None,
+    caption_file: Path | None = None,
 ) -> Path:
     w, h = size or (config.OUT_WIDTH, config.OUT_HEIGHT)
     duration = end - start
@@ -67,6 +68,12 @@ def render_clip(
     if treat:
         parts.append(f"[{stream}]{treat}[treated]")
         stream = "treated"
+
+    if caption_file is not None:
+        # After the look, so the treatment's downsample does not soften the
+        # text, and before the corner mask so captions cannot overhang it.
+        parts.append(f"[{stream}]subtitles={captions.filter_arg(caption_file)}[capped]")
+        stream = "capped"
 
     if radius > 0:
         # The mask is a still, so it needs -loop or the stream ends after one

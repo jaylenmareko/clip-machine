@@ -161,6 +161,7 @@ def _run_job(job: dict) -> None:
             out_dir = pipeline.run(job["source"], max_clips=job["max_clips"],
                                    use_llm=job["use_llm"], layout=job["layout"],
                                    instructions=job.get("instructions"),
+                                   captions=job.get("captions"),
                                    on_clip=on_clip)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8-sig"))
         job["video_id"] = manifest["video_id"]
@@ -195,7 +196,8 @@ def _drain_queue() -> None:
 
 
 def _start_job(source: str, max_clips: int | None, use_llm: bool,
-               layout: str, instructions: str | None = None) -> dict:
+               layout: str, instructions: str | None = None,
+               captions: bool | None = None) -> dict:
     global _worker_alive
     with _job_lock:
         job = {
@@ -203,7 +205,7 @@ def _start_job(source: str, max_clips: int | None, use_llm: bool,
             "status": "queued", "log": [], "clips": [],
             "source": source, "video_id": None, "error": None,
             "max_clips": max_clips, "use_llm": use_llm, "layout": layout,
-            "instructions": instructions,
+            "instructions": instructions, "captions": captions,
         }
         _jobs.append(job)
         position = sum(1 for j in _jobs if j["status"] == "queued")
@@ -626,6 +628,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         source = (data.get("source") or "").strip()
+        want_caps = bool(data.get("captions"))
         if not source:
             self._send_json({"error": "Give it a video URL or a local file path."}, 400)
             return
@@ -640,6 +643,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Detected from the source; the user is not asked.
             data.get("layout") or "auto",
             (data.get("instructions") or "").strip() or None,
+            want_caps,
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -780,6 +784,13 @@ PAGE = r"""<!doctype html>
   .btn.ghost:hover{color:var(--text);border-color:#39435a}
   .kind{background:#26304a;border:1px solid #35406090;color:#a9c0ee;
     border-radius:5px;padding:1px 7px;font-size:11px;letter-spacing:.03em}
+  /* The warning is not decoration: with captions on, ASR errors go on
+     screen, so the review step is real work. Saying so next to the
+     checkbox is cheaper than a surprise. */
+  .cap{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);
+    cursor:pointer;flex:1 1 auto}
+  .cap input{width:auto;flex:0 0 auto;accent-color:var(--accent)}
+  .cap span{color:var(--muted);font-size:12px}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
   button{background:var(--accent);color:#0a1020;border:0;border-radius:8px;
     padding:10px 20px;font:600 14px/1 inherit;cursor:pointer}
@@ -865,6 +876,8 @@ PAGE = r"""<!doctype html>
   </div>
 
   <div class="row2">
+    <label class="cap"><input type="checkbox" id="caps">
+      Burn in captions <span>&middot; adds ~3 min, and read them before posting</span></label>
     <button id="go">Generate clips</button>
   </div>
 </div>
@@ -1012,7 +1025,8 @@ $('go').onclick = async () => {
   $('log').textContent = 'Starting…';
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ source, instructions: $('say').value })
+    body: JSON.stringify({ source, instructions: $('say').value,
+                           captions: $('caps').checked })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }

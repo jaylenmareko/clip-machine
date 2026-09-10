@@ -10,9 +10,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import (assemble, audio_features, config, cut, download,
-               layout as layout_detect, llm, looks, modes, score,
-               transcribe)
+from . import (assemble, audio_features, captions as captions_mod, config,
+               cut, download, layout as layout_detect, llm, looks, modes,
+               score, transcribe)
 
 
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
@@ -20,6 +20,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         instructions: str | None = None,
         look: str | None = None, radius: int | None = None,
         compile_to: float | None = None,
+        captions: bool | None = None,
         on_clip=None) -> Path:
     """Longform in, vertical clips out.
 
@@ -42,7 +43,16 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         print("[1b/6] Detecting layout from the source...")
         layout = layout_detect.detect(video_path)
 
-    words_cache = config.WORK_DIR / f"{video_id}.words.json"
+    want_caps = config.CAPTIONS if captions is None else captions
+    asr_model = config.transcribe_model(want_caps)
+    # Model in the cache key on purpose: a tiny.en transcript reused for a
+    # captioned run would put tiny.en's errors on screen, which is the whole
+    # thing the upgrade exists to avoid.
+    words_cache = config.WORK_DIR / f"{video_id}.{asr_model}.words.json"
+    legacy_cache = config.WORK_DIR / f"{video_id}.words.json"
+    if (not words_cache.exists() and legacy_cache.exists()
+            and asr_model == "tiny.en"):
+        words_cache = legacy_cache      # pre-existing caches were all tiny.en
 
     # Tell the user how long this will take before they start waiting. Rates
     # are the ones measured on this machine: transcription ~8x realtime with
@@ -56,13 +66,14 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         print(f"      -> {source_secs/60:.0f} min of source; "
               f"about {max(1, round(eta / 60))} min to process")
 
-    print(f"[2/6] Transcribing locally (faster-whisper {config.WHISPER_MODEL}) — "
+    print(f"[2/6] Transcribing locally (faster-whisper {asr_model}"
+          f"{', captions on' if want_caps else ''}) — "
           f"this is the slow part...")
     if words_cache.exists():
         words = json.loads(words_cache.read_text(encoding="utf-8-sig"))
         print(f"      -> reused cached transcript ({len(words)} words)")
     else:
-        words = transcribe.transcribe(video_path)
+        words = transcribe.transcribe(video_path, model=asr_model)
         words_cache.write_text(json.dumps(words), encoding="utf-8")
         print(f"      -> {len(words)} words in {time.time() - t0:.0f}s")
 
@@ -179,8 +190,15 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
     def render_one(n: int, c: dict) -> dict:
         clip_path = out_dir / f"clip_{n:02d}.mp4"
+        cap_file = None
+        if want_caps:
+            cap_file = captions_mod.build_ass(
+                words, c["start"], c["end"],
+                config.WORK_DIR / f"{video_id}.clip{n:02d}.ass",
+                (config.OUT_WIDTH, config.OUT_HEIGHT))
         cut.render_clip(video_path, c["start"], c["end"], clip_path,
-                        layout=layout, look=look, radius=radius)
+                        layout=layout, look=look, radius=radius,
+                        caption_file=cap_file)
         thumb = cut.make_thumbnail(clip_path, out_dir / f"clip_{n:02d}.jpg")
 
         print(f"      -> clip_{n:02d}.mp4  "
@@ -249,6 +267,8 @@ def main() -> None:
                         f"(default {config.CORNER_RADIUS})")
     p.add_argument("--look", default=None, choices=list(looks.LOOKS),
                    help=f"picture treatment (default {config.LOOK})")
+    p.add_argument("--captions", action="store_true",
+                   help="burn in captions (forces a better ASR model)")
     p.add_argument("--say", default=None, dest="instructions",
                    help="plain-English steer, e.g. \"only the Gaza parts\"")
     p.add_argument("--mode", default="auto", choices=["auto"] + list(modes.MODES),
@@ -261,7 +281,8 @@ def main() -> None:
         mode=args.mode, layout=args.layout,
         instructions=args.instructions, look=args.look,
         radius=args.radius,
-        compile_to=assemble.parse_target(args.compile_to))
+        compile_to=assemble.parse_target(args.compile_to),
+        captions=True if args.captions else None)
 
 
 if __name__ == "__main__":

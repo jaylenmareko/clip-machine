@@ -9,6 +9,7 @@ from pathlib import Path
 from . import config
 
 _model = None
+_model_name = None
 
 
 def extract_audio(video_path: Path) -> Path:
@@ -83,14 +84,15 @@ def commit_ratio() -> float | None:
 _MODEL_RAM_GB = {"tiny.en": 0.6, "base.en": 1.0, "small.en": 2.2, "medium.en": 5.0}
 
 
-def preflight() -> None:
+def preflight(model: str | None = None) -> None:
     """Warn before a long run gets OOM-killed or paged into the ground."""
     free = free_ram_gb()
     if free is None:
         return
-    need = _MODEL_RAM_GB.get(config.WHISPER_MODEL, 2.0)
+    model = model or config.WHISPER_MODEL
+    need = _MODEL_RAM_GB.get(model, 2.0)
     if free < need + 0.5:
-        print(f"  ! Only {free:.1f}GB RAM free; {config.WHISPER_MODEL} wants "
+        print(f"  ! Only {free:.1f}GB RAM free; {model} wants "
               f"~{need}GB. Close OneDrive/browser tabs, or set "
               f"CLIP_WHISPER_MODEL=tiny.en, or this may get killed mid-run.")
 
@@ -105,22 +107,28 @@ def preflight() -> None:
               f"worth more here than any setting.")
 
 
-def _get_model():
-    global _model
-    if _model is None:
+def _get_model(name: str | None = None):
+    """Load (and cache) a model. Reloads if a DIFFERENT model is asked for -
+    otherwise turning captions on mid-session would keep using tiny.en."""
+    global _model, _model_name
+    name = name or config.WHISPER_MODEL
+    if _model is None or _model_name != name:
+        _model_name = name
         from faster_whisper import WhisperModel
         # int8 on CPU is the only sane config on a GPU-less ultrabook.
         _model = WhisperModel(
-            config.WHISPER_MODEL, device="cpu", compute_type="int8",
+            name, device="cpu", compute_type="int8",
             cpu_threads=config.WHISPER_THREADS,
         )
     return _model
 
 
-def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
+def transcribe(video_path: Path, verbose: bool = True,
+               model: str | None = None) -> list[dict]:
     """Return a flat list of {word, start, end} for the whole video."""
     audio_path = extract_audio(video_path)
-    preflight()
+    model = model or config.WHISPER_MODEL
+    preflight(model)
 
     # Chunked parallel path, when asked for and when RAM allows. Returns None
     # for short sources, where per-worker model loading costs more than it
@@ -131,18 +139,18 @@ def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
         from . import split_asr
         n = split_asr.plan_workers(
             config.ASR_WORKERS, free_ram_gb(),
-            _MODEL_RAM_GB.get(config.WHISPER_MODEL, 2.0), _os.cpu_count() or 4)
+            _MODEL_RAM_GB.get(model, 2.0), _os.cpu_count() or 4)
         if n < config.ASR_WORKERS and verbose:
             print(f"      (asking for {config.ASR_WORKERS} ASR workers, "
                   f"only {n} fit in free RAM)")
         words = split_asr.transcribe_parallel(
-            audio_path, config.WORK_DIR, config.WHISPER_MODEL,
+            audio_path, config.WORK_DIR, model,
             workers=n, threads=config.WHISPER_THREADS,
             batch=config.BATCH_SIZE, verbose=verbose)
         if words is not None:
             return words
 
-    model = _get_model()
+    whisper = _get_model(model)
 
     # Batched inference is ~2.5x faster than sequential on this CPU (measured
     # same-session on 900s: 153.0s -> 60.3s) and still returns word-level
@@ -159,7 +167,7 @@ def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
     if config.BATCH_SIZE > 1:
         try:
             from faster_whisper import BatchedInferencePipeline
-            pipeline = BatchedInferencePipeline(model=model)
+            pipeline = BatchedInferencePipeline(model=whisper)
             segments, _ = pipeline.transcribe(
                 str(audio_path), batch_size=config.BATCH_SIZE,
                 word_timestamps=True, vad_parameters=vad,
@@ -169,7 +177,7 @@ def transcribe(video_path: Path, verbose: bool = True) -> list[dict]:
             segments = None
 
     if segments is None:
-        segments, _ = model.transcribe(
+        segments, _ = whisper.transcribe(
             str(audio_path),
             word_timestamps=True,
             vad_filter=True,  # skips silence — real speedup on longform
