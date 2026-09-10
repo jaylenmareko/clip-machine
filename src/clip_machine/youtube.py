@@ -237,9 +237,12 @@ DEFAULT_HOUR = 9           # first slot; later ones spread across the day
 DEFAULT_PER_DAY = 3
 
 
+SPAN_HOURS = 12     # same-day slots spread across this many hours
+
+
 def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
                hour: int = DEFAULT_HOUR, minute: int = 0,
-               start_days: int = 1, tz=None, span_hours: int = 12) -> list:
+               start_days: int = 1, tz=None, span_hours: int = SPAN_HOURS) -> list:
     """Publish times for n clips: `per_day` each day, starting tomorrow.
 
     Same-day slots spread across `span_hours` from the start time rather
@@ -307,4 +310,43 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
         "deferred": [c["file"] for _, c in deferred],
         "already_posted": len(clips) - len(todo),
         "quota": f"{used + len(done)} of {MAX_UPLOADS_PER_DAY} uploads used today",
+    }
+
+
+def plan(clips: list[dict], video_id: str, per_day: int = DEFAULT_PER_DAY,
+         hour: int = DEFAULT_HOUR, minute: int = 0) -> dict:
+    """What schedule_batch WOULD do. Uploads nothing.
+
+    Exists so the confirm dialog can show real dates before anything
+    irreversible happens - "Fri 11 Sep 9:00 AM" explains the cadence better
+    than any label describing what "3 a day" means.
+    """
+    already = publish.posted_pairs()
+    todo = [c for c in clips
+            if (publish.clip_id(video_id, c.get("start", -1)), "youtube")
+            not in already]
+    used = uploads_today()
+    room = max(0, MAX_UPLOADS_PER_DAY - used)
+    now_batch = todo[:room]
+    times = plan_times(len(now_batch), per_day=per_day, hour=hour,
+                       minute=minute)
+    # The gap is derived, not chosen: slots spread across a 12-hour span, so
+    # it falls out of per_day. Worth returning because "3 a day" does not
+    # tell you whether that means every 4 hours or three in a row.
+    gap_hours = (SPAN_HOURS / per_day) if per_day > 1 else None
+    return {
+        "per_day": per_day,
+        "gap_hours": gap_hours,
+        "queued": len(clips),
+        "already_posted": len(clips) - len(todo),
+        "will_upload": len(now_batch),
+        "deferred": max(0, len(todo) - room),
+        "used_today": used,
+        "max_per_day": MAX_UPLOADS_PER_DAY,
+        "items": [
+            {"file": c["file"],
+             "title": (c.get("title") or "").split("#")[0].strip(),
+             "when": t.isoformat()}
+            for c, t in zip(now_batch, times)
+        ],
     }

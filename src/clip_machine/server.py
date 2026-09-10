@@ -532,7 +532,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif route.startswith("/bundle/"):
             vid = urllib.parse.unquote(route[len("/bundle/"):]).strip("/")
             if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "bad request"}, 400)
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
                 return
             mpath = config.CLIPS_DIR / vid / "manifest.json"
             if not mpath.exists():
@@ -577,7 +577,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
         if path not in ("/api/run", "/api/feedback", "/api/queue",
-                        "/api/youtube"):
+                        "/api/youtube", "/api/youtube/plan"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -588,7 +588,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             file = (data.get("file") or "").strip()
             verdict = data.get("verdict")
             if not vid or not file or "/" in file or ".." in file + vid:
-                self._send_json({"error": "bad request"}, 400)
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
                 return
             reason = data.get("reason") or ""
             self._send_json({"ok": True,
@@ -596,10 +596,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                                          reason)})
             return
 
+        if path == "/api/youtube/plan":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                clips = json.loads(
+                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") == "queued"]
+            try:
+                per_day = max(1, min(6, int(data.get("per_day") or 3)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                per_day, hour, minute = 3, 9, 0
+            self._send_json(youtube.plan(picked, vid, per_day=per_day,
+                                         hour=hour, minute=minute))
+            return
+
         if path == "/api/youtube":
             vid = (data.get("video_id") or "").strip()
             if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "bad request"}, 400)
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
                 return
             if not youtube.configured():
                 self._send_json({"error": "YouTube is not connected yet."}, 400)
@@ -643,7 +671,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # file would race each other.
             vid = (data.get("video_id") or "").strip()
             if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "bad request"}, 400)
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
                 return
             manifest_path = config.CLIPS_DIR / vid / "manifest.json"
             if not manifest_path.exists():
@@ -821,7 +849,27 @@ PAGE = r"""<!doctype html>
   .ytset select,.ytset input{width:auto;padding:5px 7px;font-size:12px;
     background:#0f131b;border:1px solid var(--line);color:var(--text);
     border-radius:6px}
-  .ytfrom{color:var(--muted)}
+  /* A confirm sheet, because uploading is irreversible. The point of it is
+     the LIST of real dates - "Fri 11 Sep 9:00 AM" explains the cadence
+     better than any label describing what "3 a day" means. */
+  .modal{position:fixed;inset:0;background:#05070bd0;display:flex;
+    align-items:center;justify-content:center;padding:24px;z-index:50}
+  .sheet{background:var(--panel);border:1px solid var(--line);
+    border-radius:14px;padding:20px 22px;max-width:440px;width:100%;
+    max-height:86vh;overflow:auto}
+  .sheet h3{margin:0 0 14px;font-size:16px;letter-spacing:-.01em}
+  .ytrow{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+  .ytrow label{font-size:13px;color:var(--muted);display:flex;
+    align-items:center;gap:7px}
+  .ytrow select,.ytrow input{width:auto;padding:6px 8px;font-size:13px}
+  .ytsum{margin:0 0 10px;font-size:13.5px;color:var(--text);font-weight:600}
+  .ytlist{margin:0 0 12px;padding-left:22px;font-size:12.5px;
+    color:#a8b6cc;line-height:1.75}
+  .ytlist b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .ytnote{margin:0 0 16px;font-size:12px;color:var(--muted);line-height:1.5}
+  .ytacts{display:flex;gap:9px;justify-content:flex-end}
+  .ytacts .btn{flex:0 0 auto;padding:8px 16px}
+  .ytwarn{color:var(--bad)}
   .pnote{color:var(--muted);font-size:12px}
   .proj .grid{padding:12px 16px 16px}
   .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
@@ -955,6 +1003,30 @@ PAGE = r"""<!doctype html>
   <div class="grid" id="livegrid"></div>
 </div>
 
+<div class="modal" id="ytmodal" hidden>
+  <div class="sheet">
+    <h3>Schedule on YouTube</h3>
+    <div class="ytrow">
+      <label>Post <select id="ytper">
+        <option value="1">1 a day</option>
+        <option value="2">2 a day</option>
+        <option value="3" selected>3 a day</option>
+        <option value="4">4 a day</option>
+        <option value="6">6 a day</option>
+      </select></label>
+      <label>starting at <input id="ythour" type="time" value="09:00"></label>
+    </div>
+    <p class="ytsum" id="ytsum">Working it out…</p>
+    <ol class="ytlist" id="ytlist"></ol>
+    <p class="ytnote">Each video uploads private and YouTube makes it public
+      at its time. Nothing is public before then.</p>
+    <div class="ytacts">
+      <button class="btn ghost" id="ytcancel">Cancel</button>
+      <button class="btn" id="ytgo" disabled>Upload</button>
+    </div>
+  </div>
+</div>
+
 <h2>Library</h2>
 <div id="projects"></div>
 <div class="empty" id="noclips">Paste a link to a long video above. You'll get
@@ -1029,38 +1101,100 @@ document.addEventListener('click', async e => {
 document.addEventListener('click', async e => {
   const b = e.target.closest('button[data-yt]');
   if (!b) return;
-  const vid = b.dataset.yt;
-  const set = document.querySelector(`.ytset[data-ytset="${vid}"]`);
-  const perDay = parseInt(set?.querySelector('.ytper')?.value || '3', 10);
-  const [hour, minute] = (set?.querySelector('.ythour')?.value || '09:00')
-    .split(':').map(n => parseInt(n, 10));
-  const was = b.textContent;
-  b.disabled = true; b.textContent = 'Uploading…';
+  YT_VID = b.dataset.yt;
+  $('ytmodal').hidden = false;
+  ytRefresh();
+});
+
+// The sheet asks first. Uploading cannot be undone from here - the token
+// only carries the upload scope - so the confirm step is the only place a
+// mistake can still be caught.
+let YT_VID = null;
+
+function ytOpts(){
+  const [h, m] = ($('ythour').value || '09:00').split(':').map(Number);
+  return {per_day: parseInt($('ytper').value, 10) || 3,
+          hour: h || 0, minute: m || 0};
+}
+
+async function ytRefresh(){
+  const go = $('ytgo');
+  go.disabled = true;
+  $('ytlist').innerHTML = '';
+  $('ytsum').className = 'ytsum';
+  $('ytsum').textContent = 'Working it out…';
+  try {
+    const r = await fetch('/api/youtube/plan', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: YT_VID, ...ytOpts()})
+    });
+    const j = await r.json();
+    if (j.error){ $('ytsum').textContent = j.error; return; }
+
+    if (!j.will_upload){
+      $('ytsum').className = 'ytsum ytwarn';
+      $('ytsum').textContent = j.used_today >= j.max_per_day
+        ? `Today's upload limit is used up (${j.used_today} of ${j.max_per_day}). Try again after midnight Pacific.`
+        : 'Nothing left to upload for this project.';
+      return;
+    }
+
+    // Say the SPACING, not just the start. "3 a day" leaves open whether
+    // that is every four hours or three back to back.
+    const gap = j.gap_hours
+      ? `, ${j.gap_hours % 1 ? j.gap_hours.toFixed(1) : j.gap_hours}h apart`
+      : '';
+    $('ytsum').textContent =
+      `${j.will_upload} of ${j.queued} clips upload now — ${j.per_day} a day${gap}:`;
+    $('ytlist').innerHTML = j.items.map(it => {
+      const d = new Date(it.when);
+      const when = d.toLocaleString([], {weekday:'short', day:'numeric',
+        month:'short', hour:'numeric', minute:'2-digit'});
+      return `<li><b>${when}</b> &mdash; ${(it.title||'').replace(/[<>&]/g,'').slice(0,52)}</li>`;
+    }).join('');
+
+    const tail = [];
+    if (j.deferred) tail.push(`${j.deferred} more wait for tomorrow — YouTube allows ${j.max_per_day} uploads a day.`);
+    if (j.already_posted) tail.push(`${j.already_posted} already posted, skipped.`);
+    if (tail.length){
+      const li = document.createElement('p');
+      li.className = 'ytnote';
+      li.textContent = tail.join(' ');
+      $('ytlist').after(li);
+    }
+    go.textContent = `Upload ${j.will_upload}`;
+    go.disabled = false;
+  } catch (err) { $('ytsum').textContent = 'Could not work out a schedule.'; }
+}
+
+$('ytper').onchange = ytRefresh;
+$('ythour').onchange = ytRefresh;
+$('ytcancel').onclick = () => { $('ytmodal').hidden = true; };
+$('ytmodal').onclick = e => {
+  if (e.target === $('ytmodal')) $('ytmodal').hidden = true;
+};
+
+$('ytgo').onclick = async () => {
+  const go = $('ytgo');
+  go.disabled = true; go.textContent = 'Uploading…';
   try {
     const r = await fetch('/api/youtube', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({video_id: vid, per_day: perDay, hour: hour,
-                            minute: minute})
+      body: JSON.stringify({video_id: YT_VID, ...ytOpts()})
     });
     const j = await r.json();
-    const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
-    if (j.error) {
-      if (note) note.textContent = j.error;
-      b.textContent = was;
-    } else {
-      const n = (j.scheduled || []).length;
-      const bits = [`${n} scheduled on YouTube`];
-      if (j.deferred && j.deferred.length)
-        bits.push(`${j.deferred.length} waiting for tomorrow's quota`);
-      if (j.failed && j.failed.length) bits.push(`${j.failed.length} failed`);
-      if (j.already_posted) bits.push(`${j.already_posted} already posted`);
-      if (note) note.textContent = bits.join(' · ');
-      b.textContent = n ? `${n} scheduled` : was;
-      console.log('youtube', j);
-    }
-  } catch (err) { b.textContent = was; }
-  b.disabled = false;
-});
+    const note = document.querySelector(`.pnote[data-vid="${YT_VID}"]`);
+    const n = (j.scheduled || []).length;
+    const bits = [];
+    if (n) bits.push(`${n} scheduled on YouTube`);
+    if (j.deferred && j.deferred.length) bits.push(`${j.deferred.length} waiting for tomorrow`);
+    if (j.failed && j.failed.length) bits.push(`${j.failed.length} failed`);
+    if (note) note.textContent = bits.join(' · ') || (j.error || 'Nothing uploaded');
+    console.log('youtube', j);
+  } catch (err) {}
+  $('ytmodal').hidden = true;
+  go.textContent = 'Upload';
+};
 
 // Batch confirm. One decision for the whole project, so one request - and
 // fifteen separate writes to the same feedback file would race each other.
@@ -1105,8 +1239,7 @@ function updateAllBar(vid){
   if (bundle) bundle.hidden = !queued;
   const yt = document.querySelector(`button[data-yt="${vid}"]`);
   if (yt) yt.hidden = !queued;
-  const set = document.querySelector(`.ytset[data-ytset="${vid}"]`);
-  if (set) set.hidden = !queued;
+
 
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
   if (!note) return;
@@ -1212,18 +1345,7 @@ function projectFolder(s, open){
       want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
-      <span class="ytset" data-ytset="${esc(s.video_id)}" hidden>
-        <select class="ytper">
-          <option value="1">1 a day</option>
-          <option value="2">2 a day</option>
-          <option value="3" selected>3 a day</option>
-          <option value="4">4 a day</option>
-          <option value="6">6 a day</option>
-        </select>
-        <span class="ytfrom">from</span>
-        <input class="ythour" type="time" value="09:00">
-      </span>
-      <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube</button>
+      <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube…</button>
       <a class="btn ghost bundle" href="/bundle/${encodeURIComponent(s.video_id)}"
          data-bundle="${esc(s.video_id)}" hidden>Download bundle</a>
       <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Just the videos</a>
