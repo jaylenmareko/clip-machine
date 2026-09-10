@@ -1024,14 +1024,11 @@ PAGE = r"""<!doctype html>
     <h3>Download</h3>
     <button class="pick" id="dlfull">
       <b>Full bundle</b>
-      <span>Videos, plus a spreadsheet of every title and description ready
-        to paste into YouTube, TikTok or a scheduler.</span>
+      <span>Videos + titles and descriptions</span>
     </button>
     <button class="pick" id="dlvids">
       <b>Just the videos</b>
-      <span>The mp4 files on their own. Captions are burned into the picture,
-        so they come either way — what you lose is the titles and
-        descriptions.</span>
+      <span>Video files only</span>
     </button>
     <div class="ytacts">
       <button class="btn ghost" id="dlcancel">Cancel</button>
@@ -1304,7 +1301,6 @@ function updateAllBar(vid){
   if (!note) return;
   const bits = [];
   if (removed) bits.push(`${removed} removed`);
-  if (queued) bits.push('bundle has the clips plus titles and descriptions');
   note.textContent = bits.join(' · ');
 }
 
