@@ -854,6 +854,11 @@ PAGE = r"""<!doctype html>
      better than any label describing what "3 a day" means. */
   .modal{position:fixed;inset:0;background:#05070bd0;display:flex;
     align-items:center;justify-content:center;padding:24px;z-index:50}
+  /* The `hidden` attribute is only display:none from the browser's default
+     sheet, so the display:flex above outranked it and the sheet could never
+     close - it was on screen from page load. Any element toggled with
+     `hidden` needs this whenever author CSS sets display. */
+  .modal[hidden]{display:none}
   .sheet{background:var(--panel);border:1px solid var(--line);
     border-radius:14px;padding:20px 22px;max-width:440px;width:100%;
     max-height:86vh;overflow:auto}
@@ -862,7 +867,11 @@ PAGE = r"""<!doctype html>
   .ytrow label{font-size:13px;color:var(--muted);display:flex;
     align-items:center;gap:7px}
   .ytrow select,.ytrow input{width:auto;padding:6px 8px;font-size:13px}
-  .ytsum{margin:0 0 10px;font-size:13.5px;color:var(--text);font-weight:600}
+  .ytsum{margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:400;
+    line-height:1.9}
+  .ytsum b{color:var(--text);font-weight:600}
+  .ytsum .ok{color:var(--good)}
+  .ytsum .wait{color:#d9a13a}
   .ytlist{margin:0 0 12px;padding-left:22px;font-size:12.5px;
     color:#a8b6cc;line-height:1.75}
   .ytlist b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
@@ -1139,29 +1148,32 @@ async function ytRefresh(){
       return;
     }
 
-    // Say the SPACING, not just the start. "3 a day" leaves open whether
-    // that is every four hours or three back to back.
+    // A breakdown, not one sentence. Three groups matter and they are
+    // different facts: what is already gone, what goes now, what has to
+    // wait for quota. Collapsing them read as one confusing number.
     const gap = j.gap_hours
-      ? `, ${j.gap_hours % 1 ? j.gap_hours.toFixed(1) : j.gap_hours}h apart`
-      : '';
-    $('ytsum').textContent =
-      `${j.will_upload} of ${j.queued} clips upload now — ${j.per_day} a day${gap}:`;
+      ? `${j.gap_hours % 1 ? j.gap_hours.toFixed(1) : j.gap_hours}h apart`
+      : 'once a day';
+    const reset = j.quota_resets
+      ? new Date(j.quota_resets).toLocaleString([], {weekday:'short',
+          hour:'numeric', minute:'2-digit'})
+      : 'tomorrow';
+
+    const rows = [];
+    if (j.already_posted)
+      rows.push(`<span class="ok">${j.already_posted} already on YouTube</span>`);
+    rows.push(`<b>${j.will_upload} upload now</b> — ${j.per_day} a day, ${gap}`);
+    if (j.deferred)
+      rows.push(`<span class="wait">${j.deferred} wait for quota</span> — `
+        + `${j.max_per_day} uploads a day max, next batch after ${reset}`);
+    $('ytsum').innerHTML = rows.join('<br>');
+
     $('ytlist').innerHTML = j.items.map(it => {
       const d = new Date(it.when);
       const when = d.toLocaleString([], {weekday:'short', day:'numeric',
         month:'short', hour:'numeric', minute:'2-digit'});
       return `<li><b>${when}</b> &mdash; ${(it.title||'').replace(/[<>&]/g,'').slice(0,52)}</li>`;
     }).join('');
-
-    const tail = [];
-    if (j.deferred) tail.push(`${j.deferred} more wait for tomorrow — YouTube allows ${j.max_per_day} uploads a day.`);
-    if (j.already_posted) tail.push(`${j.already_posted} already posted, skipped.`);
-    if (tail.length){
-      const li = document.createElement('p');
-      li.className = 'ytnote';
-      li.textContent = tail.join(' ');
-      $('ytlist').after(li);
-    }
     go.textContent = `Upload ${j.will_upload}`;
     go.disabled = false;
   } catch (err) { $('ytsum').textContent = 'Could not work out a schedule.'; }

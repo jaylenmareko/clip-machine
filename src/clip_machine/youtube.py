@@ -334,7 +334,16 @@ def plan(clips: list[dict], video_id: str, per_day: int = DEFAULT_PER_DAY,
     # it falls out of per_day. Worth returning because "3 a day" does not
     # tell you whether that means every 4 hours or three in a row.
     gap_hours = (SPAN_HOURS / per_day) if per_day > 1 else None
+    # When the deferred ones become uploadable: the quota resets at midnight
+    # US/Pacific, which is a different clock from the user's, so give the
+    # actual local time rather than saying "tomorrow" and being wrong.
+    pacific = timezone(timedelta(hours=-8))
+    now_pac = datetime.now(pacific)
+    reset_local = ((now_pac + timedelta(days=1))
+                   .replace(hour=0, minute=0, second=0, microsecond=0)
+                   .astimezone())
     return {
+        "quota_resets": reset_local.isoformat(),
         "per_day": per_day,
         "gap_hours": gap_hours,
         "queued": len(clips),
