@@ -544,13 +544,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "could not read that project"}, 500)
                 return
             fb = _read_feedback(vid)
-            # Only what was actually confirmed. Bundling everything would
-            # make the Schedule button a no-op and quietly publish clips the
-            # user removed.
+            # Everything except what was removed - same rule as the plain
+            # zip. This used to require clips be QUEUED first, which made
+            # "Full bundle" fail for anyone who had not scheduled yet.
+            # Downloading is not publishing, so there is nothing to gate.
             picked = [c for c in data.get("clips", [])
-                      if fb.get(c["file"], {}).get("verdict") == "queued"]
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
             if not picked:
-                self._send_json({"error": "nothing is queued for this project"}, 400)
+                self._send_json({"error": "Every clip in this project was removed."}, 400)
                 return
             path = publish.bundle(vid, picked, data.get("source", ""),
                                   config.CLIPS_DIR / vid)
@@ -879,6 +880,12 @@ PAGE = r"""<!doctype html>
   .ytacts{display:flex;gap:9px;justify-content:flex-end}
   .ytacts .btn{flex:0 0 auto;padding:8px 16px}
   .ytwarn{color:var(--bad)}
+  .pick{display:block;width:100%;text-align:left;background:#0f131b;
+    border:1px solid var(--line);border-radius:10px;padding:13px 15px;
+    margin-bottom:10px;cursor:pointer;color:var(--text);font:inherit}
+  .pick:hover{border-color:var(--accent);background:#141b28}
+  .pick b{display:block;font-size:14px;margin-bottom:4px}
+  .pick span{display:block;font-size:12px;color:var(--muted);line-height:1.5}
   .pnote{color:var(--muted);font-size:12px}
   .proj .grid{padding:12px 16px 16px}
   .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
@@ -1012,6 +1019,26 @@ PAGE = r"""<!doctype html>
   <div class="grid" id="livegrid"></div>
 </div>
 
+<div class="modal" id="dlmodal" hidden>
+  <div class="sheet">
+    <h3>Download</h3>
+    <button class="pick" id="dlfull">
+      <b>Full bundle</b>
+      <span>Videos, plus a spreadsheet of every title and description ready
+        to paste into YouTube, TikTok or a scheduler.</span>
+    </button>
+    <button class="pick" id="dlvids">
+      <b>Just the videos</b>
+      <span>The mp4 files on their own. Captions are burned into the picture,
+        so they come either way — what you lose is the titles and
+        descriptions.</span>
+    </button>
+    <div class="ytacts">
+      <button class="btn ghost" id="dlcancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="ytmodal" hidden>
   <div class="sheet">
     <h3>Schedule on YouTube</h3>
@@ -1114,6 +1141,28 @@ document.addEventListener('click', async e => {
   $('ytmodal').hidden = false;
   ytRefresh();
 });
+
+// Download: one button, two choices in a sheet. Two buttons side by side
+// made the user weigh a decision before knowing what either meant.
+let DL_VID = null;
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-dl]');
+  if (!b) return;
+  DL_VID = b.dataset.dl;
+  $('dlmodal').hidden = false;
+});
+$('dlcancel').onclick = () => { $('dlmodal').hidden = true; };
+$('dlmodal').onclick = e => {
+  if (e.target === $('dlmodal')) $('dlmodal').hidden = true;
+};
+$('dlfull').onclick = () => {
+  $('dlmodal').hidden = true;
+  window.location = `/bundle/${encodeURIComponent(DL_VID)}`;
+};
+$('dlvids').onclick = () => {
+  $('dlmodal').hidden = true;
+  window.location = `/zip/${encodeURIComponent(DL_VID)}`;
+};
 
 // The sheet asks first. Uploading cannot be undone from here - the token
 // only carries the upload scope - so the confirm step is the only place a
@@ -1247,8 +1296,6 @@ function updateAllBar(vid){
       : `Schedule ${keeping} clip${keeping===1?'':'s'}`;
     btn.classList.toggle('done', !!queued);
   }
-  const bundle = document.querySelector(`a[data-bundle="${vid}"]`);
-  if (bundle) bundle.hidden = !queued;
   const yt = document.querySelector(`button[data-yt="${vid}"]`);
   if (yt) yt.hidden = !queued;
 
@@ -1358,9 +1405,7 @@ function projectFolder(s, open){
     <div class="pbar">
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
       <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube…</button>
-      <a class="btn ghost bundle" href="/bundle/${encodeURIComponent(s.video_id)}"
-         data-bundle="${esc(s.video_id)}" hidden>Download bundle</a>
-      <a class="btn ghost" href="/zip/${encodeURIComponent(s.video_id)}">Just the videos</a>
+      <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
     </div>
     <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
