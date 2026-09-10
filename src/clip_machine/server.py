@@ -616,12 +616,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             picked = [c for c in clips
                       if fb.get(c["file"], {}).get("verdict") == "queued"]
             try:
-                per_day = max(1, min(6, int(data.get("per_day") or 3)))
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
                 hour = max(0, min(23, int(data.get("hour") or 9)))
                 minute = max(0, min(59, int(data.get("minute") or 0)))
             except (TypeError, ValueError):
-                per_day, hour, minute = 3, 9, 0
-            self._send_json(youtube.plan(picked, vid, per_day=per_day,
+                gap, hour, minute = 4.0, 9, 0
+            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
                                          hour=hour, minute=minute))
             return
 
@@ -652,16 +652,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "Nothing is queued for this project."}, 400)
                 return
             try:
-                per_day = max(1, min(6, int(data.get("per_day") or 3)))
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
                 hour = max(0, min(23, int(data.get("hour") or 9)))
                 minute = max(0, min(59, int(data.get("minute") or 0)))
             except (TypeError, ValueError):
-                per_day, hour, minute = 3, 9, 0
+                gap, hour, minute = 4.0, 9, 0
             # Uploading is slow and blocking; the browser waits on it. Fine
             # for six clips, and simpler than a second job queue.
             result = youtube.schedule_batch(
                 picked, config.CLIPS_DIR / vid, vid,
-                per_day=per_day, hour=hour, minute=minute)
+                gap_hours=gap, hour=hour, minute=minute)
             self._send_json(result)
             return
 
@@ -1038,14 +1038,15 @@ PAGE = r"""<!doctype html>
   <div class="sheet">
     <h3>Schedule on YouTube</h3>
     <div class="ytrow">
-      <label>Post <select id="ytper">
-        <option value="1">1 a day</option>
-        <option value="2">2 a day</option>
-        <option value="3" selected>3 a day</option>
-        <option value="4">4 a day</option>
-        <option value="6">6 a day</option>
+      <label>Every <select id="ytgap">
+        <option value="2">2 hours</option>
+        <option value="3">3 hours</option>
+        <option value="4" selected>4 hours</option>
+        <option value="6">6 hours</option>
+        <option value="8">8 hours</option>
+        <option value="24">day</option>
       </select></label>
-      <label>starting at <input id="ythour" type="time" value="09:00"></label>
+      <label>from <input id="ythour" type="time" value="09:00"></label>
     </div>
     <p class="ytsum" id="ytsum">Working it out…</p>
     <ol class="ytlist" id="ytlist"></ol>
@@ -1166,7 +1167,7 @@ let YT_VID = null;
 
 function ytOpts(){
   const [h, m] = ($('ythour').value || '09:00').split(':').map(Number);
-  return {per_day: parseInt($('ytper').value, 10) || 3,
+  return {gap_hours: parseFloat($('ytgap').value) || 4,
           hour: h || 0, minute: m || 0};
 }
 
@@ -1195,9 +1196,9 @@ async function ytRefresh(){
     // A breakdown, not one sentence. Three groups matter and they are
     // different facts: what is already gone, what goes now, what has to
     // wait for quota. Collapsing them read as one confusing number.
-    const gap = j.gap_hours
-      ? `${j.gap_hours % 1 ? j.gap_hours.toFixed(1) : j.gap_hours}h apart`
-      : 'once a day';
+    const gap = j.gap_hours >= 24
+      ? 'one a day'
+      : `${j.per_day} a day, ${j.gap_hours}h apart`;
     const reset = j.quota_resets
       ? new Date(j.quota_resets).toLocaleString([], {weekday:'short',
           hour:'numeric', minute:'2-digit'})
@@ -1206,7 +1207,7 @@ async function ytRefresh(){
     const rows = [];
     if (j.already_posted)
       rows.push(`<span class="ok">${j.already_posted} already on YouTube</span>`);
-    rows.push(`<b>${j.will_upload} upload now</b> — ${j.per_day} a day, ${gap}`);
+    rows.push(`<b>${j.will_upload} upload now</b> — ${gap}`);
     if (j.deferred)
       rows.push(`<span class="wait">${j.deferred} wait for quota</span> — `
         + `${j.max_per_day} uploads a day max, next batch after ${reset}`);
@@ -1223,7 +1224,7 @@ async function ytRefresh(){
   } catch (err) { $('ytsum').textContent = 'Could not work out a schedule.'; }
 }
 
-$('ytper').onchange = ytRefresh;
+$('ytgap').onchange = ytRefresh;
 $('ythour').onchange = ytRefresh;
 $('ytcancel').onclick = () => { $('ytmodal').hidden = true; };
 $('ytmodal').onclick = e => {

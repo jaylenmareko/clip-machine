@@ -240,14 +240,26 @@ DEFAULT_PER_DAY = 3
 SPAN_HOURS = 12     # same-day slots spread across this many hours
 
 
-def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
-               hour: int = DEFAULT_HOUR, minute: int = 0,
-               start_days: int = 1, tz=None, span_hours: int = SPAN_HOURS) -> list:
-    """Publish times for n clips: `per_day` each day, starting tomorrow.
+def slots_per_day(gap_hours: float, span_hours: int = SPAN_HOURS) -> int:
+    """How many posts fit in a day at this spacing."""
+    if gap_hours >= span_hours:
+        return 1
+    return int(span_hours // gap_hours) + (0 if span_hours % gap_hours else 0)         or 1
 
-    Same-day slots spread across `span_hours` from the start time rather
-    than a fixed gap - at 6 a day a fixed 2h gap would bunch every post
-    into the morning and leave the evening empty.
+
+def plan_times(n: int, gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
+               minute: int = 0, start_days: int = 1, tz=None,
+               span_hours: int = SPAN_HOURS) -> list:
+    """Publish times for n clips, `gap_hours` apart, starting tomorrow.
+
+    The GAP is the input now, and posts-per-day falls out of it. It was the
+    other way round - pick a count, have the spacing derived - which meant
+    the one thing a person actually wants to control was read-only.
+
+    Slots march forward by the gap until they would leave a `span_hours`
+    daytime window, then wrap to the same start time the next day. Without
+    that wrap, "every 4 hours" from 9am would schedule posts at 1am and
+    5am, which is technically correct spacing and nobody's intent.
 
     Starts tomorrow, not today: a 9am slot requested at 11am is a time in
     the past, which the API rejects, and publishing it immediately instead
@@ -255,10 +267,10 @@ def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
     """
     tz = tz or datetime.now().astimezone().tzinfo
     now = datetime.now(tz)
-    per_day = max(1, per_day)
+    gap = max(0.25, float(gap_hours))
+    per_day = slots_per_day(gap, span_hours)
     base = (now + timedelta(days=start_days)).replace(
         hour=hour, minute=minute, second=0, microsecond=0)
-    gap = (span_hours / per_day) if per_day > 1 else 0
     out = []
     for i in range(n):
         day, slot = divmod(i, per_day)
@@ -270,7 +282,7 @@ def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
 
 
 def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
-                   per_day: int = DEFAULT_PER_DAY, hour: int = DEFAULT_HOUR,
+                   gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
                    minute: int = 0, privacy_after: str = "public") -> dict:
     """Upload as many clips as today's quota allows, each with a publish time.
 
@@ -289,7 +301,8 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
     room = max(0, MAX_UPLOADS_PER_DAY - used)
     batch, deferred = todo[:room], todo[room:]
 
-    times = plan_times(len(batch), per_day=per_day, hour=hour, minute=minute)
+    times = plan_times(len(batch), gap_hours=gap_hours, hour=hour,
+                       minute=minute)
     done, failed = [], []
     for (cid, c), when in zip(batch, times):
         path = clip_dir / c["file"]
@@ -313,7 +326,7 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
     }
 
 
-def plan(clips: list[dict], video_id: str, per_day: int = DEFAULT_PER_DAY,
+def plan(clips: list[dict], video_id: str, gap_hours: float = 4.0,
          hour: int = DEFAULT_HOUR, minute: int = 0) -> dict:
     """What schedule_batch WOULD do. Uploads nothing.
 
@@ -328,12 +341,12 @@ def plan(clips: list[dict], video_id: str, per_day: int = DEFAULT_PER_DAY,
     used = uploads_today()
     room = max(0, MAX_UPLOADS_PER_DAY - used)
     now_batch = todo[:room]
-    times = plan_times(len(now_batch), per_day=per_day, hour=hour,
+    times = plan_times(len(now_batch), gap_hours=gap_hours, hour=hour,
                        minute=minute)
     # The gap is derived, not chosen: slots spread across a 12-hour span, so
     # it falls out of per_day. Worth returning because "3 a day" does not
     # tell you whether that means every 4 hours or three in a row.
-    gap_hours = (SPAN_HOURS / per_day) if per_day > 1 else None
+    per_day = slots_per_day(gap_hours)
     # When the deferred ones become uploadable: the quota resets at midnight
     # US/Pacific, which is a different clock from the user's, so give the
     # actual local time rather than saying "tomorrow" and being wrong.
