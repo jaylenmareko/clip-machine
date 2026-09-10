@@ -904,7 +904,6 @@ PAGE = r"""<!doctype html>
   .cap{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);
     cursor:pointer;flex:1 1 auto}
   .cap input{width:auto;flex:0 0 auto;accent-color:var(--accent)}
-  .cap span{color:var(--muted);font-size:12px}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
   button{background:var(--accent);color:#0a1020;border:0;border-radius:8px;
     padding:10px 20px;font:600 14px/1 inherit;cursor:pointer}
@@ -995,8 +994,7 @@ PAGE = r"""<!doctype html>
   </div>
 
   <div class="row2">
-    <label class="cap"><input type="checkbox" id="caps">
-      Burn in captions <span>&middot; adds ~3 min, and read them before posting</span></label>
+    <label class="cap"><input type="checkbox" id="caps"> Add captions</label>
     <button id="go">Generate clips</button>
   </div>
 </div>
