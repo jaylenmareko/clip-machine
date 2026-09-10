@@ -426,6 +426,7 @@ def _library() -> list[dict]:
             "count": len(clips),
             "clips": clips,
             "feedback": feedback,
+            "published": publish.by_file(d.name),
             "source": m.get("source", ""),
             "mode": m.get("mode", ""),
             "created": int(d.stat().st_mtime),
@@ -806,6 +807,14 @@ PAGE = r"""<!doctype html>
     font-weight:600}
   .clip.rejected{opacity:.42}
   .clip.queued{border-color:#2c4a37;box-shadow:inset 0 0 0 1px #2c4a3755}
+  /* Already on YouTube: recede it, because the decision is made and the
+     card is now a record rather than something to act on. Not as faded as
+     a removed clip - this one is a success. */
+  .clip.onair{opacity:.72;border-color:#2b3c5c}
+  .clip.onair:hover{opacity:1}
+  .clip.onair video{filter:saturate(.85)}
+  .onair-tag{margin:0 0 7px;font-size:11px;font-weight:600;
+    letter-spacing:.02em;color:#7fb2ff;text-transform:uppercase}
   /* The reason box only appears once Reject is pressed - the verdict is not
      sent until Submit, so a mis-click costs nothing. */
   .why{margin-top:8px}
@@ -1069,7 +1078,8 @@ const $ = id => document.getElementById(id);
 let running = false;
 
 const AUDIO_SIGNALS = new Set(['loud','animated','fast']);
-const FEEDBACK = {};   // video_id -> {file: 'keep'|'reject'}
+const FEEDBACK = {};
+const PUBLISHED = {};   // video_id -> {file: 'keep'|'reject'}
 let CURRENT_VID = null;
 
 document.addEventListener('click', async e => {
@@ -1330,6 +1340,19 @@ function splitTitle(s){
   return {text: raw.slice(0, i).trim(), tags: raw.slice(i).trim()};
 }
 
+// A clip already on YouTube must read differently at a glance. Without
+// that the grid gives no way to tell what has gone out, which is how six
+// accidental uploads sat unnoticed among sixteen identical cards.
+function pubLabel(p){
+  if (!p) return '';
+  if (p.status !== 'posted') return 'Upload failed';
+  if (!p.publish_at) return 'On YouTube · private';
+  const d = new Date(p.publish_at);
+  const when = d.toLocaleString([], {weekday:'short', day:'numeric',
+    month:'short', hour:'numeric', minute:'2-digit'});
+  return (d > new Date() ? 'Scheduled ' : 'Published ') + when;
+}
+
 function card(c, vid){
   const src = `/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.file)}`;
   const esc = s => (s||'').replace(/[<>&]/g,'');
@@ -1339,12 +1362,15 @@ function card(c, vid){
   };
   const fb = (FEEDBACK[vid]||{})[c.file] || {};
   const v = fb.verdict || '', r = fb.reason || '';
+  const pub = (PUBLISHED[vid]||{})[c.file] || null;
+  const live = pub && pub.status === 'posted';
   const full = (c.title || c.hook || '').trim();
   const t = splitTitle(full);
-  return `<div class="clip${v==='reject'?' rejected':''}${v==='approve'?' approved':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
+  return `<div class="clip${v==='reject'?' rejected':''}${v==='queued'?' queued':''}${live?' onair':''}" data-vid="${esc(vid)}" data-file="${esc(c.file)}">
     <video src="${src}" controls preload="metadata"
       ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
     <div class="meta">
+      ${live?`<p class="onair-tag">${pubLabel(pub)}</p>`:''}
       <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
       <p class="tags clamp" title="${esc(t.tags)}">${esc(t.tags)}</p>
       <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}</p>
@@ -1408,7 +1434,8 @@ function projectFolder(s, open){
 }
 
 function renderLibrary(sets, expand){
-  sets.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {}; });
+  sets.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {};
+                      PUBLISHED[s.video_id] = s.published || {}; });
   $('projects').innerHTML = sets
     .map((s, i) => projectFolder(s, expand ? s.video_id === expand : i === 0))
     .join('');

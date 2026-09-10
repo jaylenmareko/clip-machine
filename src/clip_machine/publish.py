@@ -230,3 +230,28 @@ def bundle(video_id: str, clips: list[dict], source: str,
                "export", "exported",
                note=f"bundle {path.name}")
     return path
+
+
+def by_file(video_id: str) -> dict:
+    """{clip filename: latest publish state} for one project.
+
+    Feeds the card badges. The ledger is append-only and per EVENT, so a
+    clip can have a failure and then a success; the last row per
+    (file, platform) wins, which is the state that is actually true now.
+    """
+    out: dict[str, dict] = {}
+    for r in history():
+        if r.get("video_id") != video_id or r.get("platform") == "export":
+            continue
+        f = r.get("file")
+        if not f:
+            continue
+        # publishAt was recorded inside the free-text note; parse it back
+        # rather than migrate the file, so older rows still read correctly.
+        when = None
+        note = r.get("note") or ""
+        if "publishAt=" in note:
+            when = note.split("publishAt=", 1)[1].split()[0]
+        out[f] = {"platform": r.get("platform"), "status": r.get("status"),
+                  "url": r.get("url"), "publish_at": when, "at": r.get("at")}
+    return out
