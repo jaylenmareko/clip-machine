@@ -623,15 +623,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "Nothing is queued for this project."}, 400)
                 return
             try:
-                per_day = max(1, min(6, int(data.get("per_day") or 1)))
-                hour = max(0, min(23, int(data.get("hour") or 18)))
+                per_day = max(1, min(6, int(data.get("per_day") or 3)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
             except (TypeError, ValueError):
-                per_day, hour = 1, 18
+                per_day, hour, minute = 3, 9, 0
             # Uploading is slow and blocking; the browser waits on it. Fine
             # for six clips, and simpler than a second job queue.
             result = youtube.schedule_batch(
                 picked, config.CLIPS_DIR / vid, vid,
-                per_day=per_day, hour=hour)
+                per_day=per_day, hour=hour, minute=minute)
             self._send_json(result)
             return
 
@@ -813,6 +814,14 @@ PAGE = r"""<!doctype html>
   .pbar .sched.done{background:transparent;color:var(--good);
     border:1px solid #2c4a37}
   .pbar .sched:disabled{opacity:.5;cursor:default}
+  /* Cadence lives next to the button that uses it. 6/day is the ceiling
+     because that is the API's upload quota, not a taste decision. */
+  .ytset{display:flex;align-items:center;gap:6px;font-size:12px;
+    color:var(--muted)}
+  .ytset select,.ytset input{width:auto;padding:5px 7px;font-size:12px;
+    background:#0f131b;border:1px solid var(--line);color:var(--text);
+    border-radius:6px}
+  .ytfrom{color:var(--muted)}
   .pnote{color:var(--muted);font-size:12px}
   .proj .grid{padding:12px 16px 16px}
   .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
@@ -1021,12 +1030,17 @@ document.addEventListener('click', async e => {
   const b = e.target.closest('button[data-yt]');
   if (!b) return;
   const vid = b.dataset.yt;
+  const set = document.querySelector(`.ytset[data-ytset="${vid}"]`);
+  const perDay = parseInt(set?.querySelector('.ytper')?.value || '3', 10);
+  const [hour, minute] = (set?.querySelector('.ythour')?.value || '09:00')
+    .split(':').map(n => parseInt(n, 10));
   const was = b.textContent;
   b.disabled = true; b.textContent = 'Uploading…';
   try {
     const r = await fetch('/api/youtube', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({video_id: vid, per_day: 1, hour: 18})
+      body: JSON.stringify({video_id: vid, per_day: perDay, hour: hour,
+                            minute: minute})
     });
     const j = await r.json();
     const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
@@ -1091,6 +1105,8 @@ function updateAllBar(vid){
   if (bundle) bundle.hidden = !queued;
   const yt = document.querySelector(`button[data-yt="${vid}"]`);
   if (yt) yt.hidden = !queued;
+  const set = document.querySelector(`.ytset[data-ytset="${vid}"]`);
+  if (set) set.hidden = !queued;
 
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
   if (!note) return;
@@ -1196,6 +1212,17 @@ function projectFolder(s, open){
       want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
+      <span class="ytset" data-ytset="${esc(s.video_id)}" hidden>
+        <select class="ytper">
+          <option value="1">1 a day</option>
+          <option value="2">2 a day</option>
+          <option value="3" selected>3 a day</option>
+          <option value="4">4 a day</option>
+          <option value="6">6 a day</option>
+        </select>
+        <span class="ytfrom">from</span>
+        <input class="ythour" type="time" value="09:00">
+      </span>
       <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube</button>
       <a class="btn ghost bundle" href="/bundle/${encodeURIComponent(s.video_id)}"
          data-bundle="${esc(s.video_id)}" hidden>Download bundle</a>

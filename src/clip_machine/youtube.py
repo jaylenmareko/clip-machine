@@ -233,29 +233,33 @@ def upload(clip_path: Path, title: str, description: str,
 # of posting - and it is worth saying that out loud rather than letting the
 # seventh upload fail.
 # --------------------------------------------------------------------------
-DEFAULT_HOUR = 18          # 6pm local reads as evening-scroll time
-DEFAULT_PER_DAY = 1
+DEFAULT_HOUR = 9           # first slot; later ones spread across the day
+DEFAULT_PER_DAY = 3
 
 
 def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
-               hour: int = DEFAULT_HOUR, start_days: int = 1,
-               tz=None) -> list:
-    """Publish times for n clips: `per_day` each day, from tomorrow.
+               hour: int = DEFAULT_HOUR, minute: int = 0,
+               start_days: int = 1, tz=None, span_hours: int = 12) -> list:
+    """Publish times for n clips: `per_day` each day, starting tomorrow.
 
-    Starts tomorrow, not today: a clip scheduled for 6pm when it is already
-    7pm would be rejected by the API as a time in the past, and silently
-    publishing it immediately instead would be worse.
+    Same-day slots spread across `span_hours` from the start time rather
+    than a fixed gap - at 6 a day a fixed 2h gap would bunch every post
+    into the morning and leave the evening empty.
+
+    Starts tomorrow, not today: a 9am slot requested at 11am is a time in
+    the past, which the API rejects, and publishing it immediately instead
+    would be worse than waiting a day.
     """
     tz = tz or datetime.now().astimezone().tzinfo
     now = datetime.now(tz)
+    per_day = max(1, per_day)
     base = (now + timedelta(days=start_days)).replace(
-        hour=hour, minute=0, second=0, microsecond=0)
+        hour=hour, minute=minute, second=0, microsecond=0)
+    gap = (span_hours / per_day) if per_day > 1 else 0
     out = []
     for i in range(n):
-        day, slot = divmod(i, max(1, per_day))
-        # Space same-day slots evenly through the evening rather than
-        # stacking them on the same minute.
-        t = base + timedelta(days=day, hours=slot * 2)
+        day, slot = divmod(i, per_day)
+        t = base + timedelta(days=day, hours=slot * gap)
         if t <= now:
             t = now + timedelta(minutes=20)
         out.append(t)
@@ -264,7 +268,7 @@ def plan_times(n: int, per_day: int = DEFAULT_PER_DAY,
 
 def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
                    per_day: int = DEFAULT_PER_DAY, hour: int = DEFAULT_HOUR,
-                   privacy_after: str = "public") -> dict:
+                   minute: int = 0, privacy_after: str = "public") -> dict:
     """Upload as many clips as today's quota allows, each with a publish time.
 
     Returns what happened, including what did NOT fit - a scheduler that
@@ -282,7 +286,7 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
     room = max(0, MAX_UPLOADS_PER_DAY - used)
     batch, deferred = todo[:room], todo[room:]
 
-    times = plan_times(len(batch), per_day=per_day, hour=hour)
+    times = plan_times(len(batch), per_day=per_day, hour=hour, minute=minute)
     done, failed = [], []
     for (cid, c), when in zip(batch, times):
         path = clip_dir / c["file"]
