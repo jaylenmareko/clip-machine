@@ -427,6 +427,7 @@ def _library() -> list[dict]:
             "clips": clips,
             "feedback": feedback,
             "published": publish.by_file(d.name),
+            "footer": m.get("footer", ""),
             "source": m.get("source", ""),
             "mode": m.get("mode", ""),
             "created": int(d.stat().st_mtime),
@@ -555,7 +556,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "Every clip in this project was removed."}, 400)
                 return
             path = publish.bundle(vid, picked, data.get("source", ""),
-                                  config.CLIPS_DIR / vid)
+                                  config.CLIPS_DIR / vid,
+                                  footer=data.get("footer", ""))
             self._send_file(path)
             return
         elif route.startswith("/zip/"):
@@ -580,7 +582,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path not in ("/api/run", "/api/feedback", "/api/queue",
                         "/api/youtube", "/api/youtube/plan",
-                        "/api/clip"):
+                        "/api/clip", "/api/project"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -597,6 +599,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True,
                              "feedback": _write_feedback(vid, file, verdict,
                                                          reason)})
+            return
+
+        if path == "/api/project":
+            # One footer per project, appended wherever a description is
+            # used. Stored ONCE rather than baked into every clip: editing
+            # it updates all of them, and applying it twice cannot
+            # duplicate it - which hand-editing 16 descriptions would.
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            man["footer"] = (data.get("footer") or "").strip()[:2000]
+            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "footer": man["footer"]})
             return
 
         if path == "/api/clip":
@@ -679,8 +704,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send_json({"error": "unknown project"}, 404)
                 return
             try:
-                clips = json.loads(
-                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+                clips = man.get("clips", [])
             except Exception:
                 self._send_json({"error": "could not read that project"}, 500)
                 return
@@ -702,7 +727,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # for six clips, and simpler than a second job queue.
             result = youtube.schedule_batch(
                 picked, config.CLIPS_DIR / vid, vid,
-                gap_hours=gap, hour=hour, minute=minute)
+                gap_hours=gap, hour=hour, minute=minute,
+                footer=man.get("footer", ""))
             self._send_json(result)
             return
 
@@ -958,6 +984,7 @@ PAGE = r"""<!doctype html>
   .pick:hover{border-color:var(--accent);background:#141b28}
   .pick b{display:block;font-size:14px;margin-bottom:4px}
   .pick span{display:block;font-size:12px;color:var(--muted);line-height:1.5}
+  .foot{display:block;margin-top:6px;color:#7d8ea8}
   .fld{display:block;margin-bottom:12px;font-size:12px;color:var(--muted)}
   .fld textarea{width:100%;margin-top:5px;background:#0f131b;
     border:1px solid var(--line);color:var(--text);border-radius:7px;
@@ -1093,6 +1120,22 @@ PAGE = r"""<!doctype html>
   <div class="grid" id="livegrid"></div>
 </div>
 
+<div class="modal" id="ftmodal" hidden>
+  <div class="sheet">
+    <h3>Add to all descriptions</h3>
+    <label class="fld">Goes at the end of every clip's description
+      <textarea id="fttext" rows="4"
+        placeholder="Watch the full episode at peacetothesaints.com"></textarea></label>
+    <p class="ytnote">Stored once for the project, so editing it here
+      changes every clip. Clips already uploaded keep what they were
+      posted with.</p>
+    <div class="ytacts">
+      <button class="btn ghost" id="ftcancel">Cancel</button>
+      <button class="btn" id="ftsave">Save</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="edmodal" hidden>
   <div class="sheet">
     <h3>Edit clip</h3>
@@ -1163,7 +1206,8 @@ let running = false;
 
 const AUDIO_SIGNALS = new Set(['loud','animated','fast']);
 const FEEDBACK = {};
-const PUBLISHED = {};   // video_id -> {file: 'keep'|'reject'}
+const PUBLISHED = {};
+const FOOTERS = {};   // video_id -> {file: 'keep'|'reject'}
 let CURRENT_VID = null;
 
 document.addEventListener('click', async e => {
@@ -1231,6 +1275,37 @@ document.addEventListener('click', async e => {
   $('ytmodal').hidden = false;
   ytRefresh();
 });
+
+// One footer for the whole project. Bulk-editing sixteen descriptions to
+// paste the same line into each is the wrong shape for the actual job -
+// and it would duplicate the moment you ran it twice.
+let FT_VID = null;
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-ft]');
+  if (!b) return;
+  FT_VID = b.dataset.ft;
+  $('fttext').value = FOOTERS[FT_VID] || '';
+  $('ftmodal').hidden = false;
+  $('fttext').focus();
+});
+$('ftcancel').onclick = () => { $('ftmodal').hidden = true; };
+$('ftmodal').onclick = e => {
+  if (e.target === $('ftmodal')) $('ftmodal').hidden = true;
+};
+$('ftsave').onclick = async () => {
+  const btn = $('ftsave');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/project', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: FT_VID, footer: $('fttext').value})
+    });
+    const j = await r.json();
+    if (j.ok){ FOOTERS[FT_VID] = j.footer; $('ftmodal').hidden = true;
+               library(FT_VID); }
+  } catch (err) {}
+  btn.disabled = false; btn.textContent = 'Save';
+};
 
 // Edit title / hashtags / description. The card's own text is what gets
 // edited, so the sheet is seeded from the live manifest values rather than
@@ -1531,7 +1606,8 @@ function card(c, vid){
     <div class="meta">
       <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
       <p class="tags clamp" title="${esc(t.tags)}">${esc(t.tags)}</p>
-      <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}</p>
+      <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}${
+        FOOTERS[vid] ? `<span class="foot">${esc(FOOTERS[vid])}</span>` : ''}</p>
       <div class="stats">
         <span class="from">from ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
@@ -1586,6 +1662,7 @@ function projectFolder(s, open){
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
       <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube…</button>
       <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
+      <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Add to all descriptions…</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
     </div>
     <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
@@ -1594,7 +1671,8 @@ function projectFolder(s, open){
 
 function renderLibrary(sets, expand){
   sets.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {};
-                      PUBLISHED[s.video_id] = s.published || {}; });
+                      PUBLISHED[s.video_id] = s.published || {};
+                      FOOTERS[s.video_id] = s.footer || ''; });
   $('projects').innerHTML = sets
     .map((s, i) => projectFolder(s, expand ? s.video_id === expand : i === 0))
     .join('');

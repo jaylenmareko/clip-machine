@@ -113,8 +113,22 @@ def posted_pairs() -> set[tuple[str, str]]:
 # --------------------------------------------------------------------------
 # bundle
 # --------------------------------------------------------------------------
+def full_description(clip: dict, footer: str = "") -> str:
+    """A clip's description plus the project footer, if there is one.
+
+    Single place on purpose: the bundle and the YouTube uploader both need
+    this, and applying it in one path and forgetting the other is how a
+    link ends up on half the posts.
+    """
+    body = (clip.get("description") or "").strip()
+    foot = (footer or "").strip()
+    if not foot:
+        return body
+    return f"{body}\n\n{foot}" if body else foot
+
+
 def build_queue(video_id: str, clips: list[dict], source: str = "",
-                platforms=PLATFORMS) -> dict:
+                platforms=PLATFORMS, footer: str = "") -> dict:
     """The publish plan. This is the file a worker would read."""
     already = posted_pairs()
     items = []
@@ -130,7 +144,7 @@ def build_queue(video_id: str, clips: list[dict], source: str = "",
             "duration": round(float(c.get("duration", 0)), 2),
             "title": title,
             "hashtags": tags,
-            "description": c.get("description", ""),
+            "description": full_description(c, footer),
             "platforms": targets,
             "status": "pending",
             # Left null on purpose: the app does not pick posting times.
@@ -201,11 +215,11 @@ def readme(queue: dict) -> str:
 
 
 def bundle(video_id: str, clips: list[dict], source: str,
-           out_dir: Path) -> Path:
+           out_dir: Path, footer: str = "") -> Path:
     """Write the zip a person downloads. Records the export in the ledger."""
     import zipfile
 
-    queue = build_queue(video_id, clips, source)
+    queue = build_queue(video_id, clips, source, footer=footer)
     stamp = time.strftime("%Y-%m-%d")
     path = out_dir / f"{video_id}-publish-{stamp}.zip"
     clip_dir = config.CLIPS_DIR / video_id

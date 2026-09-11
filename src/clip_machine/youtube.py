@@ -283,7 +283,8 @@ def plan_times(n: int, gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
 
 def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
                    gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
-                   minute: int = 0, privacy_after: str = "public") -> dict:
+                   minute: int = 0, privacy_after: str = "public",
+                   footer: str = "") -> dict:
     """Upload as many clips as today's quota allows, each with a publish time.
 
     Returns what happened, including what did NOT fit - a scheduler that
@@ -308,7 +309,8 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
         path = clip_dir / c["file"]
         try:
             res = upload(path, c.get("title", "")[:100],
-                         c.get("description", ""), privacy="private",
+                         publish.full_description(c, footer),
+                         privacy="private",
                          video_id=video_id, clip_id=cid, publish_at=when)
             done.append({"file": c["file"], "url": res["url"],
                          "publish_at": res.get("publish_at"),
