@@ -1238,8 +1238,11 @@ PAGE = r"""<!doctype html>
   .ytrow label{font-size:13px;color:var(--muted);display:flex;
     align-items:center;gap:7px}
   .ytrow select,.ytrow input{width:auto;padding:6px 8px;font-size:13px}
-  .ytsum{margin:0 0 12px;font-size:13px;color:var(--muted);font-weight:400;
-    line-height:1.9}
+  .ytsum{margin:0 0 10px;font-size:13.5px;color:var(--text);
+    line-height:1.5}
+  .ytleft{margin:0 0 14px;padding:10px 12px;background:#161b26;
+    border-left:3px solid #d9a13a;border-radius:6px;font-size:12px;
+    color:#c6cfdd;line-height:1.55}
   .ytsum b{color:var(--text);font-weight:600}
   .ytsum .ok{color:var(--good)}
   .ytsum .wait{color:#d9a13a}
@@ -1471,6 +1474,7 @@ PAGE = r"""<!doctype html>
     <p class="ytsum" id="ytsum">Working it out…</p>
     <p class="draghint" id="draghint" hidden>Drag to change the order</p>
     <ol class="ytlist" id="ytlist"></ol>
+    <p class="ytleft" id="ytleft" hidden></p>
     <p class="ytnote">Each video uploads private and YouTube makes it public
       at its time. Nothing is public before then.</p>
     <div class="ytacts">
@@ -1734,27 +1738,37 @@ async function ytRefresh(){
 
     if (!j.will_upload){
       $('ytsum').className = 'ytsum ytwarn';
+      // Same plain language as the footnote - "midnight Pacific" is a
+      // clock the user does not keep, so say when in THEIR time.
+      const reset = j.quota_resets
+        ? new Date(j.quota_resets).toLocaleString([], {weekday:'long',
+            hour:'numeric', minute:'2-digit'})
+        : 'tomorrow';
       $('ytsum').textContent = j.used_today >= j.max_per_day
-        ? `Today's upload limit is used up (${j.used_today} of ${j.max_per_day}). Try again after midnight Pacific.`
-        : 'Nothing left to upload for this project.';
+        ? `You've scheduled ${j.used_today} clips today, which is YouTube's `
+          + `daily limit. Open this again after ${reset}.`
+        : 'Every clip in this project is already on YouTube.';
+      $('ytleft').hidden = true;
       return;
     }
 
-    const reset = j.quota_resets
-      ? new Date(j.quota_resets).toLocaleString([], {weekday:'short',
-          hour:'numeric', minute:'2-digit'})
-      : 'tomorrow';
+    // Lead with what IS happening. Everything else - what already went
+    // out, what did not fit - is a footnote under the list, not part of
+    // the headline. The old version opened with two exceptions and made
+    // the user assemble the actual answer from them.
+    $('ytsum').innerHTML =
+      `<b>These ${j.will_upload} clip${j.will_upload===1?'':'s'} will be scheduled:</b>`;
 
-    // No restating the cadence: the control above states it and the list
-    // below shows it. These lines carry only what the list cannot - how
-    // many clips are NOT in it, and why.
-    const rows = [`<b>${j.will_upload} clip${j.will_upload===1?'':'s'} upload now</b>`];
-    if (j.already_posted)
-      rows.push(`<span class="ok">${j.already_posted} already went out earlier</span>`);
+    const notes = [];
     if (j.deferred)
-      rows.push(`<span class="wait">${j.deferred} more can go tomorrow</span> — `
-        + `YouTube only allows ${j.max_per_day} uploads a day. Come back after ${reset}.`);
-    $('ytsum').innerHTML = rows.join('<br>');
+      notes.push(`${j.deferred} clip${j.deferred===1?'':'s'} won’t fit today. `
+        + `YouTube caps uploads at ${j.max_per_day} a day, so open this again `
+        + `tomorrow to schedule the rest.`);
+    if (j.already_posted)
+      notes.push(`${j.already_posted} clip${j.already_posted===1?'':'s'} `
+        + `already went to YouTube and ${j.already_posted===1?'is':'are'} skipped here.`);
+    $('ytleft').innerHTML = notes.join('<br><br>');
+    $('ytleft').hidden = !notes.length;
 
     // The TIMES are the schedule and stay put; dragging moves a clip
     // between slots. So slot 1 is always the earliest and reordering is
