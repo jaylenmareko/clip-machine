@@ -582,7 +582,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path not in ("/api/run", "/api/feedback",
                         "/api/youtube", "/api/youtube/plan",
-                        "/api/clip", "/api/project"):
+                        "/api/clip", "/api/project", "/api/delete"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -601,222 +601,33 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                                          reason)})
             return
 
-        if path == "/api/project":
-            # One footer per project, appended wherever a description is
-            # used. Stored ONCE rather than baked into every clip: editing
-            # it updates all of them, and applying it twice cannot
-            # duplicate it - which hand-editing 16 descriptions would.
+        if path == "/api/delete":
             vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
+            # Path safety matters more here than anywhere else - this is the
+            # only endpoint that removes files. Reject separators outright,
+            # then resolve and PROVE the result is a direct child of
+            # CLIPS_DIR before touching it.
+            if not vid or "/" in vid or chr(92) in vid or ".." in vid:
                 self._send_json({"error": "Couldn't tell which project that was."}, 400)
                 return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
+            root = config.CLIPS_DIR.resolve()
+            target = (root / vid).resolve()
+            if target.parent != root or not target.is_dir():
                 self._send_json({"error": "unknown project"}, 404)
                 return
+
+            import shutil
             try:
-                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
+                n = len(list(target.glob("clip_*.mp4")))
+                shutil.rmtree(target)
+            except Exception as e:
+                self._send_json(
+                    {"error": f"Could not delete it: {type(e).__name__}"}, 500)
                 return
-            man["footer"] = (data.get("footer") or "").strip()[:2000]
-            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
-            self._send_json({"ok": True, "footer": man["footer"]})
-            return
-
-        if path == "/api/clip":
-            vid = (data.get("video_id") or "").strip()
-            file = (data.get("file") or "").strip()
-            if not vid or not file or "/" in file or ".." in file + vid:
-                self._send_json({"error": "Couldn't tell which clip that was."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-
-            title = (data.get("title") or "").strip()
-            tags = " ".join((data.get("tags") or "").split())
-            desc = (data.get("description") or "").strip()
-            # Tags live glued to the end of the title on an upload, which is
-            # how every platform wants them - they are only separate fields
-            # while editing, so nobody has to hand-manage the spacing.
-            combined = f"{title} {tags}".strip() if tags else title
-
-            hit = None
-            for c in man.get("clips", []):
-                if c.get("file") == file:
-                    c["title"] = combined
-                    c["description"] = desc[:5000]
-                    c["edited"] = True
-                    hit = c
-                    break
-            if hit is None:
-                self._send_json({"error": "no such clip"}, 404)
-                return
-            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
-            self._send_json({"ok": True, "clip": hit})
-            return
-
-        if path == "/api/youtube/plan":
-            vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "Couldn't tell which project that was."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                clips = json.loads(
-                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-            fb = _read_feedback(vid)
-            picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") != "reject"]
-            try:
-                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
-                hour = max(0, min(23, int(data.get("hour") or 9)))
-                minute = max(0, min(59, int(data.get("minute") or 0)))
-            except (TypeError, ValueError):
-                gap, hour, minute = 4.0, 9, 0
-            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
-                                         hour=hour, minute=minute))
-            return
-
-        if path == "/api/youtube":
-            vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "Couldn't tell which project that was."}, 400)
-                return
-            if not youtube.configured():
-                self._send_json({"error": "YouTube is not connected yet."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
-                clips = man.get("clips", [])
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-            fb = _read_feedback(vid)
-            # Only clips the user actually confirmed. Anything removed, or
-            # never queued, is not this function's business.
-            picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") != "reject"]
-            if not picked:
-                self._send_json({"error": "Every clip in this project was removed."}, 400)
-                return
-            try:
-                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
-                hour = max(0, min(23, int(data.get("hour") or 9)))
-                minute = max(0, min(59, int(data.get("minute") or 0)))
-            except (TypeError, ValueError):
-                gap, hour, minute = 4.0, 9, 0
-
-            # Honour the order the user dragged into. Anything the client
-            # did not name keeps its existing position at the end, so a
-            # stale or partial order cannot silently drop a clip.
-            order = data.get("order") or []
-            if isinstance(order, list) and order:
-                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
-                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
-
-            # Uploading is slow and blocking; the browser waits on it. Fine
-            # for six clips, and simpler than a second job queue.
-            result = youtube.schedule_batch(
-                picked, config.CLIPS_DIR / vid, vid,
-                gap_hours=gap, hour=hour, minute=minute,
-                footer=man.get("footer", ""))
-            self._send_json(result)
-            return
-
-        if path == "/api/youtube/plan":
-            vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "Couldn't tell which project that was."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                clips = json.loads(
-                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-            fb = _read_feedback(vid)
-            picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") != "reject"]
-            try:
-                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
-                hour = max(0, min(23, int(data.get("hour") or 9)))
-                minute = max(0, min(59, int(data.get("minute") or 0)))
-            except (TypeError, ValueError):
-                gap, hour, minute = 4.0, 9, 0
-            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
-                                         hour=hour, minute=minute))
-            return
-
-        if path == "/api/youtube":
-            vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "Couldn't tell which project that was."}, 400)
-                return
-            if not youtube.configured():
-                self._send_json({"error": "YouTube is not connected yet."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
-                clips = man.get("clips", [])
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-            fb = _read_feedback(vid)
-            # Only clips the user actually confirmed. Anything removed, or
-            # never queued, is not this function's business.
-            picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") != "reject"]
-            if not picked:
-                self._send_json({"error": "Every clip in this project was removed."}, 400)
-                return
-            try:
-                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
-                hour = max(0, min(23, int(data.get("hour") or 9)))
-                minute = max(0, min(59, int(data.get("minute") or 0)))
-            except (TypeError, ValueError):
-                gap, hour, minute = 4.0, 9, 0
-
-            # Honour the order the user dragged into. Anything the client
-            # did not name keeps its existing position at the end, so a
-            # stale or partial order cannot silently drop a clip.
-            order = data.get("order") or []
-            if isinstance(order, list) and order:
-                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
-                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
-
-            # Uploading is slow and blocking; the browser waits on it. Fine
-            # for six clips, and simpler than a second job queue.
-            result = youtube.schedule_batch(
-                picked, config.CLIPS_DIR / vid, vid,
-                gap_hours=gap, hour=hour, minute=minute,
-                footer=man.get("footer", ""))
-            self._send_json(result)
+            # The publish ledger is deliberately NOT touched: it records what
+            # went out, and a video on YouTube does not stop existing because
+            # the local copy was deleted.
+            self._send_json({"ok": True, "deleted": n})
             return
 
         if path == "/api/project":
@@ -879,84 +690,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
             self._send_json({"ok": True, "clip": hit})
-            return
-
-        if path == "/api/youtube/plan":
-            vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "Couldn't tell which project that was."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                clips = json.loads(
-                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-            fb = _read_feedback(vid)
-            picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") != "reject"]
-            try:
-                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
-                hour = max(0, min(23, int(data.get("hour") or 9)))
-                minute = max(0, min(59, int(data.get("minute") or 0)))
-            except (TypeError, ValueError):
-                gap, hour, minute = 4.0, 9, 0
-            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
-                                         hour=hour, minute=minute))
-            return
-
-        if path == "/api/youtube":
-            vid = (data.get("video_id") or "").strip()
-            if not vid or "/" in vid or ".." in vid:
-                self._send_json({"error": "Couldn't tell which project that was."}, 400)
-                return
-            if not youtube.configured():
-                self._send_json({"error": "YouTube is not connected yet."}, 400)
-                return
-            mpath = config.CLIPS_DIR / vid / "manifest.json"
-            if not mpath.exists():
-                self._send_json({"error": "unknown project"}, 404)
-                return
-            try:
-                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
-                clips = man.get("clips", [])
-            except Exception:
-                self._send_json({"error": "could not read that project"}, 500)
-                return
-            fb = _read_feedback(vid)
-            # Only clips the user actually confirmed. Anything removed, or
-            # never queued, is not this function's business.
-            picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") != "reject"]
-            if not picked:
-                self._send_json({"error": "Every clip in this project was removed."}, 400)
-                return
-            try:
-                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
-                hour = max(0, min(23, int(data.get("hour") or 9)))
-                minute = max(0, min(59, int(data.get("minute") or 0)))
-            except (TypeError, ValueError):
-                gap, hour, minute = 4.0, 9, 0
-
-            # Honour the order the user dragged into. Anything the client
-            # did not name keeps its existing position at the end, so a
-            # stale or partial order cannot silently drop a clip.
-            order = data.get("order") or []
-            if isinstance(order, list) and order:
-                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
-                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
-
-            # Uploading is slow and blocking; the browser waits on it. Fine
-            # for six clips, and simpler than a second job queue.
-            result = youtube.schedule_batch(
-                picked, config.CLIPS_DIR / vid, vid,
-                gap_hours=gap, hour=hour, minute=minute,
-                footer=man.get("footer", ""))
-            self._send_json(result)
             return
 
         if path == "/api/youtube/plan":
@@ -1208,6 +941,15 @@ PAGE = r"""<!doctype html>
   .pbar{display:flex;align-items:center;gap:12px;padding:0 16px 4px;
     flex-wrap:wrap}
   .pbar .btn{flex:0 0 auto;padding:7px 14px}
+  /* Deletion is the one irreversible action in the bar, so it reads as
+     one: red, iconic, and pushed away from the buttons you use daily. */
+  .pbar .trash{margin-left:auto;flex:0 0 auto;background:transparent;
+    border:1px solid transparent;color:#8a6a6a;font-size:15px;
+    padding:6px 10px;line-height:1}
+  .pbar .trash:hover{color:#fff;background:var(--bad);border-color:var(--bad)}
+  .btn.danger{background:var(--bad);color:#fff;font-weight:600}
+  .btn.danger:hover{background:#c2413f}
+  .delsum{margin:0 0 12px;font-size:13.5px;color:var(--text);line-height:1.5}
   .pbar .sched{background:var(--good);color:#08130c;font-weight:600}
   .pbar .sched:hover{background:#3f9e6a}
   .pbar .sched.done{background:transparent;color:var(--good);
@@ -1407,6 +1149,19 @@ PAGE = r"""<!doctype html>
   <div class="grid" id="livegrid"></div>
 </div>
 
+<div class="modal" id="delmodal" hidden>
+  <div class="sheet">
+    <h3>Delete this project?</h3>
+    <p class="delsum" id="delsum"></p>
+    <p class="ytleft" id="delkept" hidden></p>
+    <p class="ytnote">This cannot be undone.</p>
+    <div class="ytacts">
+      <button class="btn ghost" id="delcancel">Cancel</button>
+      <button class="btn danger" id="delgo">Delete</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="ftmodal" hidden>
   <div class="sheet">
     <h3>Add to all descriptions</h3>
@@ -1564,6 +1319,47 @@ document.addEventListener('click', async e => {
   $('ytmodal').hidden = false;
   ytRefresh();
 });
+
+// Deleting removes files. The sheet names exactly what goes, and what
+// does NOT - clips already on YouTube are not ours to remove.
+let DEL_VID = null;
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-del]');
+  if (!b) return;
+  DEL_VID = b.dataset.del;
+  const cards = document.querySelectorAll(`.clip[data-vid="${DEL_VID}"]`).length;
+  const posted = Object.values(PUBLISHED[DEL_VID] || {})
+    .filter(x => x.status === 'posted').length;
+  $('delsum').textContent =
+    `${cards} clip${cards===1?'':'s'} and their titles and descriptions will `
+    + `be deleted from this computer.`;
+  const kept = $('delkept');
+  if (posted) {
+    kept.textContent = `${posted} of them ${posted===1?'is':'are'} already on `
+      + `YouTube. Those stay up — delete them in YouTube Studio if you `
+      + `want them gone.`;
+    kept.hidden = false;
+  } else { kept.hidden = true; }
+  $('delmodal').hidden = false;
+});
+$('delcancel').onclick = () => { $('delmodal').hidden = true; };
+$('delmodal').onclick = e => {
+  if (e.target === $('delmodal')) $('delmodal').hidden = true;
+};
+$('delgo').onclick = async () => {
+  const btn = $('delgo');
+  btn.disabled = true; btn.textContent = 'Deleting…';
+  try {
+    const r = await fetch('/api/delete', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: DEL_VID})
+    });
+    const j = await r.json();
+    if (j.ok) { $('delmodal').hidden = true; library(); }
+    else { $('delsum').textContent = j.error || 'Could not delete it.'; }
+  } catch (err) {}
+  btn.disabled = false; btn.textContent = 'Delete';
+};
 
 // One footer for the whole project. Bulk-editing sixteen descriptions to
 // paste the same line into each is the wrong shape for the actual job -
@@ -1978,6 +1774,8 @@ function projectFolder(s, open){
       <button class="btn yt" data-yt="${esc(s.video_id)}">Schedule on YouTube…</button>
       <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
       <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Edit All</button>
+      <button class="btn trash" data-del="${esc(s.video_id)}" title="Delete this project"
+        aria-label="Delete this project">&#128465;</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
     </div>
     <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
