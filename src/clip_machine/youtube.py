@@ -111,6 +111,21 @@ def _save(creds) -> None:
         pass
 
 
+def _pacific():
+    """YouTube counts quota on US/Pacific days, WITH daylight saving.
+
+    This was a fixed timezone(-8) - PST all year - which put the reset an
+    hour late every summer. Reading it late is the safe direction (you wait
+    longer than needed rather than retrying too early), but it is still
+    wrong, and zoneinfo has the real rules built in.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("America/Los_Angeles")
+    except Exception:
+        return timezone(timedelta(hours=-8))      # fallback: PST
+
+
 def uploads_today() -> int:
     """How many YouTube uploads the ledger already records for today.
 
@@ -118,10 +133,7 @@ def uploads_today() -> int:
     it - using local midnight would let a late-evening batch spend
     tomorrow's quota and fail mid-run.
     """
-    from datetime import datetime, timedelta, timezone
-
-    pacific = timezone(timedelta(hours=-8))   # PST; an hour out during DST
-    today = datetime.now(pacific).date().isoformat()
+    today = datetime.now(_pacific()).date().isoformat()
     return sum(1 for r in publish.history()
                if r.get("platform") == "youtube"
                and r.get("status") == "posted"
@@ -352,8 +364,7 @@ def plan(clips: list[dict], video_id: str, gap_hours: float = 4.0,
     # When the deferred ones become uploadable: the quota resets at midnight
     # US/Pacific, which is a different clock from the user's, so give the
     # actual local time rather than saying "tomorrow" and being wrong.
-    pacific = timezone(timedelta(hours=-8))
-    now_pac = datetime.now(pacific)
+    now_pac = datetime.now(_pacific())
     reset_local = ((now_pac + timedelta(days=1))
                    .replace(hour=0, minute=0, second=0, microsecond=0)
                    .astimezone())

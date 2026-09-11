@@ -1759,11 +1759,19 @@ async function ytRefresh(){
     $('ytsum').innerHTML =
       `<b>These ${j.will_upload} clip${j.will_upload===1?'':'s'} will be scheduled:</b>`;
 
+    // The real reset time, in the user's own clock. "tomorrow" is not
+    // actionable and is often wrong - the quota rolls over at midnight
+    // US/Pacific, which lands at 2 or 3am here depending on DST, so
+    // "tomorrow" could mean tonight.
+    const reset = j.quota_resets
+      ? new Date(j.quota_resets).toLocaleString([], {weekday:'long',
+          month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})
+      : 'tomorrow';
     const notes = [];
     if (j.deferred)
       notes.push(`${j.deferred} clip${j.deferred===1?'':'s'} won’t fit today. `
-        + `YouTube caps uploads at ${j.max_per_day} a day, so open this again `
-        + `tomorrow to schedule the rest.`);
+        + `YouTube caps uploads at ${j.max_per_day} a day — open this again `
+        + `after <b>${reset}</b> to schedule the rest.`);
     if (j.already_posted)
       notes.push(`${j.already_posted} clip${j.already_posted===1?'':'s'} `
         + `already went to YouTube and ${j.already_posted===1?'is':'are'} skipped here.`);
