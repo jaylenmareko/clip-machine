@@ -1662,7 +1662,7 @@ function projectFolder(s, open){
       <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
       <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube…</button>
       <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
-      <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Add to all descriptions…</button>
+      <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Edit All</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
     </div>
     <div class="grid">${s.clips.map(c => card(c, s.video_id)).join('')}</div>
