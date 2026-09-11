@@ -580,7 +580,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
-        if path not in ("/api/run", "/api/feedback", "/api/queue",
+        if path not in ("/api/run", "/api/feedback",
                         "/api/youtube", "/api/youtube/plan",
                         "/api/clip", "/api/project"):
             self._send_json({"error": "not found"}, 404)
@@ -680,7 +680,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             fb = _read_feedback(vid)
             picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") == "queued"]
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
             try:
                 gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
                 hour = max(0, min(23, int(data.get("hour") or 9)))
@@ -713,9 +713,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # Only clips the user actually confirmed. Anything removed, or
             # never queued, is not this function's business.
             picked = [c for c in clips
-                      if fb.get(c["file"], {}).get("verdict") == "queued"]
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
             if not picked:
-                self._send_json({"error": "Nothing is queued for this project."}, 400)
+                self._send_json({"error": "Every clip in this project was removed."}, 400)
                 return
             try:
                 gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
@@ -741,37 +741,300 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json(result)
             return
 
-        if path == "/api/queue":
-            # Batch confirm: mark every clip that has NOT been removed as
-            # queued. One call rather than one per clip, because it is one
-            # decision - and because fifteen separate writes to the same
-            # file would race each other.
+        if path == "/api/youtube/plan":
             vid = (data.get("video_id") or "").strip()
             if not vid or "/" in vid or ".." in vid:
                 self._send_json({"error": "Couldn't tell which project that was."}, 400)
                 return
-            manifest_path = config.CLIPS_DIR / vid / "manifest.json"
-            if not manifest_path.exists():
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
                 self._send_json({"error": "unknown project"}, 404)
                 return
             try:
                 clips = json.loads(
-                    manifest_path.read_text(encoding="utf-8-sig")).get("clips", [])
+                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
             except Exception:
                 self._send_json({"error": "could not read that project"}, 500)
                 return
             fb = _read_feedback(vid)
-            now = int(time.time())
-            for c in clips:
-                if fb.get(c["file"], {}).get("verdict") != "reject":
-                    fb[c["file"]] = {"verdict": "queued", "reason": "",
-                                     "at": now,
-                                     "start": float(c.get("start", -1))}
-            fp = _feedback_path(vid)
-            if fp.parent.exists():
-                fp.write_text(json.dumps(fb, indent=2), encoding="utf-8")
-            queued = sum(1 for v in fb.values() if v["verdict"] == "queued")
-            self._send_json({"ok": True, "feedback": fb, "queued": queued})
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
+            try:
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                gap, hour, minute = 4.0, 9, 0
+            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
+                                         hour=hour, minute=minute))
+            return
+
+        if path == "/api/youtube":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            if not youtube.configured():
+                self._send_json({"error": "YouTube is not connected yet."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+                clips = man.get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            # Only clips the user actually confirmed. Anything removed, or
+            # never queued, is not this function's business.
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
+            if not picked:
+                self._send_json({"error": "Every clip in this project was removed."}, 400)
+                return
+            try:
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                gap, hour, minute = 4.0, 9, 0
+
+            # Honour the order the user dragged into. Anything the client
+            # did not name keeps its existing position at the end, so a
+            # stale or partial order cannot silently drop a clip.
+            order = data.get("order") or []
+            if isinstance(order, list) and order:
+                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
+                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
+
+            # Uploading is slow and blocking; the browser waits on it. Fine
+            # for six clips, and simpler than a second job queue.
+            result = youtube.schedule_batch(
+                picked, config.CLIPS_DIR / vid, vid,
+                gap_hours=gap, hour=hour, minute=minute,
+                footer=man.get("footer", ""))
+            self._send_json(result)
+            return
+
+        if path == "/api/project":
+            # One footer per project, appended wherever a description is
+            # used. Stored ONCE rather than baked into every clip: editing
+            # it updates all of them, and applying it twice cannot
+            # duplicate it - which hand-editing 16 descriptions would.
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            man["footer"] = (data.get("footer") or "").strip()[:2000]
+            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "footer": man["footer"]})
+            return
+
+        if path == "/api/clip":
+            vid = (data.get("video_id") or "").strip()
+            file = (data.get("file") or "").strip()
+            if not vid or not file or "/" in file or ".." in file + vid:
+                self._send_json({"error": "Couldn't tell which clip that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+
+            title = (data.get("title") or "").strip()
+            tags = " ".join((data.get("tags") or "").split())
+            desc = (data.get("description") or "").strip()
+            # Tags live glued to the end of the title on an upload, which is
+            # how every platform wants them - they are only separate fields
+            # while editing, so nobody has to hand-manage the spacing.
+            combined = f"{title} {tags}".strip() if tags else title
+
+            hit = None
+            for c in man.get("clips", []):
+                if c.get("file") == file:
+                    c["title"] = combined
+                    c["description"] = desc[:5000]
+                    c["edited"] = True
+                    hit = c
+                    break
+            if hit is None:
+                self._send_json({"error": "no such clip"}, 404)
+                return
+            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "clip": hit})
+            return
+
+        if path == "/api/youtube/plan":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                clips = json.loads(
+                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
+            try:
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                gap, hour, minute = 4.0, 9, 0
+            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
+                                         hour=hour, minute=minute))
+            return
+
+        if path == "/api/youtube":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            if not youtube.configured():
+                self._send_json({"error": "YouTube is not connected yet."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+                clips = man.get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            # Only clips the user actually confirmed. Anything removed, or
+            # never queued, is not this function's business.
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
+            if not picked:
+                self._send_json({"error": "Every clip in this project was removed."}, 400)
+                return
+            try:
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                gap, hour, minute = 4.0, 9, 0
+
+            # Honour the order the user dragged into. Anything the client
+            # did not name keeps its existing position at the end, so a
+            # stale or partial order cannot silently drop a clip.
+            order = data.get("order") or []
+            if isinstance(order, list) and order:
+                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
+                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
+
+            # Uploading is slow and blocking; the browser waits on it. Fine
+            # for six clips, and simpler than a second job queue.
+            result = youtube.schedule_batch(
+                picked, config.CLIPS_DIR / vid, vid,
+                gap_hours=gap, hour=hour, minute=minute,
+                footer=man.get("footer", ""))
+            self._send_json(result)
+            return
+
+        if path == "/api/youtube/plan":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                clips = json.loads(
+                    mpath.read_text(encoding="utf-8-sig")).get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
+            try:
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                gap, hour, minute = 4.0, 9, 0
+            self._send_json(youtube.plan(picked, vid, gap_hours=gap,
+                                         hour=hour, minute=minute))
+            return
+
+        if path == "/api/youtube":
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            if not youtube.configured():
+                self._send_json({"error": "YouTube is not connected yet."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+                clips = man.get("clips", [])
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            fb = _read_feedback(vid)
+            # Only clips the user actually confirmed. Anything removed, or
+            # never queued, is not this function's business.
+            picked = [c for c in clips
+                      if fb.get(c["file"], {}).get("verdict") != "reject"]
+            if not picked:
+                self._send_json({"error": "Every clip in this project was removed."}, 400)
+                return
+            try:
+                gap = max(0.5, min(24.0, float(data.get("gap_hours") or 4)))
+                hour = max(0, min(23, int(data.get("hour") or 9)))
+                minute = max(0, min(59, int(data.get("minute") or 0)))
+            except (TypeError, ValueError):
+                gap, hour, minute = 4.0, 9, 0
+
+            # Honour the order the user dragged into. Anything the client
+            # did not name keeps its existing position at the end, so a
+            # stale or partial order cannot silently drop a clip.
+            order = data.get("order") or []
+            if isinstance(order, list) and order:
+                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
+                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
+
+            # Uploading is slow and blocking; the browser waits on it. Fine
+            # for six clips, and simpler than a second job queue.
+            result = youtube.schedule_batch(
+                picked, config.CLIPS_DIR / vid, vid,
+                gap_hours=gap, hour=hour, minute=minute,
+                footer=man.get("footer", ""))
+            self._send_json(result)
             return
 
         source = (data.get("source") or "").strip()
@@ -1536,29 +1799,6 @@ $('ytgo').onclick = async () => {
   go.textContent = 'Upload';
 };
 
-// Batch confirm. One decision for the whole project, so one request - and
-// fifteen separate writes to the same feedback file would race each other.
-document.addEventListener('click', async e => {
-  const b = e.target.closest('button[data-queue]');
-  if (!b) return;
-  const vid = b.dataset.queue;
-  b.disabled = true;
-  try {
-    const r = await fetch('/api/queue', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({video_id: vid})
-    });
-    const j = await r.json();
-    if (j.feedback) FEEDBACK[vid] = j.feedback;
-    document.querySelectorAll(`.clip[data-vid="${vid}"]`).forEach(card => {
-      paintVerdict(card, vid, card.dataset.file);
-    });
-    updateAllBar(vid);
-    if (j.queued) window.location = `/bundle/${encodeURIComponent(vid)}`;
-  } catch (err) {}
-  b.disabled = false;
-});
-
 function updateAllBar(vid){
   // Refresh just this project's note - how many clips the zip will skip.
   const fb = FEEDBACK[vid] || {};
@@ -1568,15 +1808,6 @@ function updateAllBar(vid){
   const cards = document.querySelectorAll(`.clip[data-vid="${vid}"]`).length;
   const keeping = Math.max(cards - removed, 0);
 
-  const btn = document.querySelector(`button[data-queue="${vid}"]`);
-  if (btn) {
-    btn.textContent = queued
-      ? `${queued} clip${queued===1?'':'s'} queued`
-      : `Schedule ${keeping} clip${keeping===1?'':'s'}`;
-    btn.classList.toggle('done', !!queued);
-  }
-  const yt = document.querySelector(`button[data-yt="${vid}"]`);
-  if (yt) yt.hidden = !queued;
 
 
   const note = document.querySelector(`.pnote[data-vid="${vid}"]`);
@@ -1723,8 +1954,7 @@ function projectFolder(s, open){
     <p class="phow">Every clip below is included. <b>Remove</b> any you don't
       want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
-      <button class="btn sched" data-queue="${esc(s.video_id)}">Schedule ${s.count-rejected} clip${s.count-rejected===1?'':'s'}</button>
-      <button class="btn ghost yt" data-yt="${esc(s.video_id)}" hidden>Schedule on YouTube…</button>
+      <button class="btn yt" data-yt="${esc(s.video_id)}">Schedule on YouTube…</button>
       <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
       <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Edit All</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
