@@ -579,7 +579,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
         if path not in ("/api/run", "/api/feedback", "/api/queue",
-                        "/api/youtube", "/api/youtube/plan"):
+                        "/api/youtube", "/api/youtube/plan",
+                        "/api/clip"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -596,6 +597,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True,
                              "feedback": _write_feedback(vid, file, verdict,
                                                          reason)})
+            return
+
+        if path == "/api/clip":
+            vid = (data.get("video_id") or "").strip()
+            file = (data.get("file") or "").strip()
+            if not vid or not file or "/" in file or ".." in file + vid:
+                self._send_json({"error": "Couldn't tell which clip that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+
+            title = (data.get("title") or "").strip()
+            tags = " ".join((data.get("tags") or "").split())
+            desc = (data.get("description") or "").strip()
+            # Tags live glued to the end of the title on an upload, which is
+            # how every platform wants them - they are only separate fields
+            # while editing, so nobody has to hand-manage the spacing.
+            combined = f"{title} {tags}".strip() if tags else title
+
+            hit = None
+            for c in man.get("clips", []):
+                if c.get("file") == file:
+                    c["title"] = combined
+                    c["description"] = desc[:5000]
+                    c["edited"] = True
+                    hit = c
+                    break
+            if hit is None:
+                self._send_json({"error": "no such clip"}, 404)
+                return
+            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "clip": hit})
             return
 
         if path == "/api/youtube/plan":
@@ -801,6 +841,9 @@ PAGE = r"""<!doctype html>
   /* Keep was removed - a clip is kept unless it is rejected, so the button
      asserted a state that was already the default. Reject is the only verdict
      now, and it reads red rather than neutral-grey. */
+  .vote button.edit{color:var(--muted);border-color:transparent;font-weight:500}
+  .vote button.edit:hover{color:var(--text);border-color:var(--line);
+    background:#161d2a}
   .vote button.rej{color:var(--muted);border-color:transparent;font-weight:500}
   .vote button.rej:hover{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a}
   .vote button.on-rej{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a;
@@ -915,6 +958,12 @@ PAGE = r"""<!doctype html>
   .pick:hover{border-color:var(--accent);background:#141b28}
   .pick b{display:block;font-size:14px;margin-bottom:4px}
   .pick span{display:block;font-size:12px;color:var(--muted);line-height:1.5}
+  .fld{display:block;margin-bottom:12px;font-size:12px;color:var(--muted)}
+  .fld textarea{width:100%;margin-top:5px;background:#0f131b;
+    border:1px solid var(--line);color:var(--text);border-radius:7px;
+    padding:8px 10px;font:inherit;font-size:13px;resize:vertical;
+    box-sizing:border-box;line-height:1.45}
+  .fld textarea:focus{outline:none;border-color:var(--accent)}
   .pnote{color:var(--muted);font-size:12px}
   .proj .grid{padding:12px 16px 16px}
   .allbar{display:flex;align-items:center;gap:12px;margin:16px 0 0}
@@ -1044,6 +1093,23 @@ PAGE = r"""<!doctype html>
   <div class="grid" id="livegrid"></div>
 </div>
 
+<div class="modal" id="edmodal" hidden>
+  <div class="sheet">
+    <h3>Edit clip</h3>
+    <label class="fld">Title
+      <textarea id="edtitle" rows="2"></textarea></label>
+    <label class="fld">Hashtags
+      <textarea id="edtags" rows="2" placeholder="#advice #wordsofwisdom"></textarea></label>
+    <label class="fld">Description
+      <textarea id="eddesc" rows="5"></textarea></label>
+    <p class="ytnote" id="ednote" hidden></p>
+    <div class="ytacts">
+      <button class="btn ghost" id="edcancel">Cancel</button>
+      <button class="btn" id="edsave">Save</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="dlmodal" hidden>
   <div class="sheet">
     <h3>Download</h3>
@@ -1165,6 +1231,56 @@ document.addEventListener('click', async e => {
   $('ytmodal').hidden = false;
   ytRefresh();
 });
+
+// Edit title / hashtags / description. The card's own text is what gets
+// edited, so the sheet is seeded from the live manifest values rather than
+// from anything cached.
+let ED = {vid: null, file: null};
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-edit]');
+  if (!b) return;
+  ED = {vid: b.dataset.vid, file: b.dataset.edit};
+  const card = b.closest('.clip');
+  const full = card.querySelector('.hook')?.title || '';
+  const tags = card.querySelector('.tags')?.title || '';
+  $('edtitle').value = full;
+  $('edtags').value = tags;
+  $('eddesc').value = card.querySelector('.desc')?.title || '';
+
+  // Editing does not reach a video that has already been uploaded - say so
+  // here rather than let someone discover it after the fact.
+  const pub = (PUBLISHED[ED.vid] || {})[ED.file];
+  const note = $('ednote');
+  if (pub && pub.status === 'posted') {
+    note.textContent = 'This clip is already on YouTube. Editing here will '
+      + 'not change the video that was uploaded — change that in YouTube Studio.';
+    note.hidden = false;
+  } else { note.hidden = true; }
+
+  $('edmodal').hidden = false;
+  $('edtitle').focus();
+});
+$('edcancel').onclick = () => { $('edmodal').hidden = true; };
+$('edmodal').onclick = e => {
+  if (e.target === $('edmodal')) $('edmodal').hidden = true;
+};
+$('edsave').onclick = async () => {
+  const btn = $('edsave');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const r = await fetch('/api/clip', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: ED.vid, file: ED.file,
+        title: $('edtitle').value, tags: $('edtags').value,
+        description: $('eddesc').value})
+    });
+    const j = await r.json();
+    if (j.ok) { $('edmodal').hidden = true; library(ED.vid); }
+    else { $('ednote').textContent = j.error || 'Could not save.';
+           $('ednote').hidden = false; }
+  } catch (err) {}
+  btn.disabled = false; btn.textContent = 'Save';
+};
 
 // Download: one button, two choices in a sheet. Two buttons side by side
 // made the user weigh a decision before knowing what either meant.
@@ -1423,6 +1539,7 @@ function card(c, vid){
         <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
       </div>
       <div class="vote">
+        <button class="edit" data-edit="${esc(c.file)}" data-vid="${esc(vid)}">Edit</button>
         <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Removed · undo':'Remove'}</button>
       </div>
       <div class="why"${v==='reject'?'':' hidden'}>
