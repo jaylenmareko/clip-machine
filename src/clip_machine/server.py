@@ -723,6 +723,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 minute = max(0, min(59, int(data.get("minute") or 0)))
             except (TypeError, ValueError):
                 gap, hour, minute = 4.0, 9, 0
+
+            # Honour the order the user dragged into. Anything the client
+            # did not name keeps its existing position at the end, so a
+            # stale or partial order cannot silently drop a clip.
+            order = data.get("order") or []
+            if isinstance(order, list) and order:
+                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
+                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
+
             # Uploading is slow and blocking; the browser waits on it. Fine
             # for six clips, and simpler than a second job queue.
             result = youtube.schedule_batch(
@@ -971,9 +980,20 @@ PAGE = r"""<!doctype html>
   .ytsum b{color:var(--text);font-weight:600}
   .ytsum .ok{color:var(--good)}
   .ytsum .wait{color:#d9a13a}
-  .ytlist{margin:0 0 12px;padding-left:22px;font-size:12.5px;
-    color:#a8b6cc;line-height:1.75}
-  .ytlist b{color:var(--text);font-weight:600;font-variant-numeric:tabular-nums}
+  .ytlist{margin:0 0 12px;padding:0;list-style:none;font-size:12.5px;
+    color:#a8b6cc}
+  .ytlist li{display:flex;align-items:center;gap:9px;padding:7px 8px;
+    border:1px solid transparent;border-radius:7px;cursor:grab;
+    background:#0f131b;margin-bottom:4px}
+  .ytlist li:hover{border-color:var(--line)}
+  .ytlist li.dragging{opacity:.55;border-color:var(--accent);cursor:grabbing}
+  .grip{color:#4d5a70;letter-spacing:-3px;font-size:15px;flex:0 0 auto;
+    line-height:1}
+  .slot{color:var(--muted);font-variant-numeric:tabular-nums;flex:0 0 14px}
+  .sl-when{color:var(--text);font-weight:600;white-space:nowrap;
+    font-variant-numeric:tabular-nums}
+  .sl-title{color:#8fa0bb;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;min-width:0}
   .ytnote{margin:0 0 16px;font-size:12px;color:var(--muted);line-height:1.5}
   .ytacts{display:flex;gap:9px;justify-content:flex-end}
   .ytacts .btn{flex:0 0 auto;padding:8px 16px}
@@ -1383,6 +1403,49 @@ $('dlvids').onclick = () => {
 // only carries the upload scope - so the confirm step is the only place a
 // mistake can still be caught.
 let YT_VID = null;
+let YT_SLOTS = [];      // publish times, fixed
+let YT_ORDER = [];      // which clip sits in each slot, draggable
+
+function ytDraw(){
+  $('ytlist').innerHTML = YT_ORDER.map((c, i) => {
+    const d = new Date(YT_SLOTS[i]);
+    const when = d.toLocaleString([], {weekday:'short', day:'numeric',
+      month:'short', hour:'numeric', minute:'2-digit'});
+    return `<li draggable="true" data-i="${i}">`
+      + `<span class="grip" aria-hidden="true">&#8942;&#8942;</span>`
+      + `<span class="slot">${i + 1}</span>`
+      + `<span class="sl-when">${when}</span>`
+      + `<span class="sl-title">${c.title.replace(/[<>&]/g,'').slice(0,60)}</span>`
+      + `</li>`;
+  }).join('');
+}
+
+// Native HTML5 drag - no library, and the list is at most six rows.
+let DRAG_FROM = null;
+document.addEventListener('dragstart', e => {
+  const li = e.target.closest('#ytlist li');
+  if (!li) return;
+  DRAG_FROM = +li.dataset.i;
+  li.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+});
+document.addEventListener('dragover', e => {
+  const li = e.target.closest('#ytlist li');
+  if (!li || DRAG_FROM === null) return;
+  e.preventDefault();                      // required or drop never fires
+  const to = +li.dataset.i;
+  if (to === DRAG_FROM) return;
+  const [moved] = YT_ORDER.splice(DRAG_FROM, 1);
+  YT_ORDER.splice(to, 0, moved);
+  DRAG_FROM = to;
+  ytDraw();
+  const el = $('ytlist').querySelector(`li[data-i="${to}"]`);
+  if (el) el.classList.add('dragging');
+});
+document.addEventListener('dragend', () => {
+  DRAG_FROM = null;
+  $('ytlist').querySelectorAll('li').forEach(l => l.classList.remove('dragging'));
+});
 
 function ytOpts(){
   const [h, m] = ($('ythour').value || '09:00').split(':').map(Number);
@@ -1432,12 +1495,12 @@ async function ytRefresh(){
         + `${j.max_per_day} uploads a day max, next batch after ${reset}`);
     $('ytsum').innerHTML = rows.join('<br>');
 
-    $('ytlist').innerHTML = j.items.map(it => {
-      const d = new Date(it.when);
-      const when = d.toLocaleString([], {weekday:'short', day:'numeric',
-        month:'short', hour:'numeric', minute:'2-digit'});
-      return `<li><b>${when}</b> &mdash; ${(it.title||'').replace(/[<>&]/g,'').slice(0,52)}</li>`;
-    }).join('');
+    // The TIMES are the schedule and stay put; dragging moves a clip
+    // between slots. So slot 1 is always the earliest and reordering is
+    // "what opens", not "when does this one go" - one idea, not two.
+    YT_SLOTS = j.items.map(it => it.when);
+    YT_ORDER = j.items.map(it => ({file: it.file, title: it.title || ''}));
+    ytDraw();
     go.textContent = `Upload ${j.will_upload}`;
     go.disabled = false;
   } catch (err) { $('ytsum').textContent = 'Could not work out a schedule.'; }
@@ -1456,7 +1519,8 @@ $('ytgo').onclick = async () => {
   try {
     const r = await fetch('/api/youtube', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({video_id: YT_VID, ...ytOpts()})
+      body: JSON.stringify({video_id: YT_VID, ...ytOpts(),
+                            order: YT_ORDER.map(c => c.file)})
     });
     const j = await r.json();
     const note = document.querySelector(`.pnote[data-vid="${YT_VID}"]`);
