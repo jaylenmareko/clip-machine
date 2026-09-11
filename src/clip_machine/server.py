@@ -973,10 +973,8 @@ PAGE = r"""<!doctype html>
   .stats{color:var(--muted);font-size:12px;display:flex;gap:10px;
     align-items:center;min-height:22px;margin-top:auto}
   .stats b{color:var(--good);font-weight:600}
-  /* The clip's LENGTH is the number you scan for when picking what to post,
-     so it stops being muted grey next to the source timestamp. */
-  .dur{background:#1b2434;border:1px solid var(--line);color:var(--text);
-    font-weight:600;border-radius:5px;padding:2px 7px;font-variant-numeric:tabular-nums}
+  /* No duration badge here: the player's own controls already show it,
+     and two places showing the same number meant reconciling them. */
   .from{color:var(--muted)}
   details{margin-top:8px}
   summary{cursor:pointer;color:var(--muted);font-size:12px}
@@ -1397,7 +1395,7 @@ function card(c, vid){
       <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
       <p class="tags clamp" title="${esc(t.tags)}">${esc(t.tags)}</p>
       <p class="desc" title="${esc(c.description||'')}">${esc(c.description||'')}</p>
-      <div class="stats"><span class="dur">${clock(c.duration)}</span>
+      <div class="stats">
         <span class="from">from ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
       <div class="acts">
