@@ -812,6 +812,14 @@ PAGE = r"""<!doctype html>
      a removed clip - this one is a success. */
   .clip.onair{border-color:#2b3c5c}
   .media{position:relative}
+  /* Chrome drops the native time readout on a video narrower than about
+     300px, and at 4 cards across these are 248px. So the timecode is ours:
+     same information, same place, independent of the browser's width
+     heuristics. Sits above the controls bar and ignores clicks. */
+  .tc{position:absolute;right:7px;bottom:38px;pointer-events:none;
+    background:#0a0d14c8;color:#eaf0fa;font-size:11px;font-weight:600;
+    font-variant-numeric:tabular-nums;padding:2px 6px;border-radius:5px;
+    letter-spacing:.01em}
   /* A stamp across the middle of the frame, because a small line of text
      in the metadata was missable - and missing "this already went out" is
      how a clip gets posted twice. pointer-events:none so the player still
@@ -1371,6 +1379,18 @@ function pubWhen(p){
     hour:'numeric', minute:'2-digit'});
 }
 
+document.addEventListener('timeupdate', e => {
+  const v = e.target;
+  if (!v.matches || !v.matches('.media video')) return;
+  const tc = v.parentElement.querySelector('.tc');
+  if (!tc) return;
+  const m = n => `${Math.floor(n/60)}:${String(Math.floor(n%60)).padStart(2,'0')}`;
+  // Trust the file's real duration once known; fall back to the manifest.
+  const total = isFinite(v.duration) && v.duration
+    ? m(v.duration) : tc.dataset.total;
+  tc.textContent = `${m(v.currentTime)} / ${total}`;
+}, true);
+
 function card(c, vid){
   const src = `/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.file)}`;
   const esc = s => (s||'').replace(/[<>&]/g,'');
@@ -1390,6 +1410,7 @@ function card(c, vid){
         ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
       ${live?`<div class="stamp ${pubState(pub)}">
         <b>${pubWord(pub)}</b><span>${pubWhen(pub)}</span></div>`:''}
+      <span class="tc" data-total="${clock(c.duration)}">0:00 / ${clock(c.duration)}</span>
     </div>
     <div class="meta">
       <p class="hook clamp" title="${esc(t.text)}">${esc(t.text)}</p>
