@@ -1243,6 +1243,7 @@ PAGE = r"""<!doctype html>
   .ytsum b{color:var(--text);font-weight:600}
   .ytsum .ok{color:var(--good)}
   .ytsum .wait{color:#d9a13a}
+  .draghint{margin:0 0 7px;font-size:11.5px;color:var(--muted)}
   .ytlist{margin:0 0 12px;padding:0;list-style:none;font-size:12.5px;
     color:#a8b6cc}
   .ytlist li{display:flex;align-items:center;gap:9px;padding:7px 8px;
@@ -1468,6 +1469,7 @@ PAGE = r"""<!doctype html>
       <label>starting at <input id="ythour" type="time" value="09:00"></label>
     </div>
     <p class="ytsum" id="ytsum">Working it out…</p>
+    <p class="draghint" id="draghint" hidden>Drag to change the order</p>
     <ol class="ytlist" id="ytlist"></ol>
     <p class="ytnote">Each video uploads private and YouTube makes it public
       at its time. Nothing is public before then.</p>
@@ -1738,24 +1740,20 @@ async function ytRefresh(){
       return;
     }
 
-    // A breakdown, not one sentence. Three groups matter and they are
-    // different facts: what is already gone, what goes now, what has to
-    // wait for quota. Collapsing them read as one confusing number.
-    const gap = j.gap_hours >= 24
-      ? 'one a day'
-      : `${j.per_day} a day, ${j.gap_hours}h apart`;
     const reset = j.quota_resets
       ? new Date(j.quota_resets).toLocaleString([], {weekday:'short',
           hour:'numeric', minute:'2-digit'})
       : 'tomorrow';
 
-    const rows = [];
+    // No restating the cadence: the control above states it and the list
+    // below shows it. These lines carry only what the list cannot - how
+    // many clips are NOT in it, and why.
+    const rows = [`<b>${j.will_upload} clip${j.will_upload===1?'':'s'} upload now</b>`];
     if (j.already_posted)
-      rows.push(`<span class="ok">${j.already_posted} already on YouTube</span>`);
-    rows.push(`<b>${j.will_upload} upload now</b> — ${gap}`);
+      rows.push(`<span class="ok">${j.already_posted} already went out earlier</span>`);
     if (j.deferred)
-      rows.push(`<span class="wait">${j.deferred} wait for quota</span> — `
-        + `${j.max_per_day} uploads a day max, next batch after ${reset}`);
+      rows.push(`<span class="wait">${j.deferred} more can go tomorrow</span> — `
+        + `YouTube only allows ${j.max_per_day} uploads a day. Come back after ${reset}.`);
     $('ytsum').innerHTML = rows.join('<br>');
 
     // The TIMES are the schedule and stay put; dragging moves a clip
@@ -1763,6 +1761,7 @@ async function ytRefresh(){
     // "what opens", not "when does this one go" - one idea, not two.
     YT_SLOTS = j.items.map(it => it.when);
     YT_ORDER = j.items.map(it => ({file: it.file, title: it.title || ''}));
+    $('draghint').hidden = YT_ORDER.length < 2;
     ytDraw();
     go.textContent = `Upload ${j.will_upload}`;
     go.disabled = false;
