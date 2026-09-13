@@ -777,10 +777,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not source:
             self._send_json({"error": "Give it a video URL or a local file path."}, 400)
             return
+        try:
+            want_count = int(data.get("count")) if data.get("count") else None
+        except (TypeError, ValueError):
+            want_count = None
+        if want_count is not None and want_count < 1:
+            want_count = None
         result = _start_job(
             source,
-            # Always auto: the count scales with source length in config.
-            None,
+            # Blank means as many good clips as the video has; the pipeline
+            # clamps a typed number to 1..CLIPS_MAX.
+            want_count,
             # Reranking is part of the product now, not an optional extra.
             # This defaulted to False when the old checkbox was removed, which
             # silently skipped Claude for every run started from the UI.
@@ -1042,6 +1049,8 @@ PAGE = r"""<!doctype html>
     cursor:pointer;flex:1 1 auto}
   .cap input{width:auto;flex:0 0 auto;accent-color:var(--accent)}
   .opts{display:flex;flex-direction:column;gap:10px}
+  .cap.count input{width:64px;padding:4px 6px}
+  .cap.count .hint{padding-left:0}
   .cap:has(.hint){flex-wrap:wrap;row-gap:2px}
   .cap .hint{flex-basis:100%;padding-left:24px;color:var(--muted);font-size:12px}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
@@ -1133,6 +1142,9 @@ PAGE = r"""<!doctype html>
 
   <div class="row2">
     <div class="opts">
+      <label class="cap count">How many clips?
+        <input type="number" id="count" min="1" max="__CLIPS_MAX__" step="1" inputmode="numeric">
+        <span class="hint">Leave blank for as many as we can (up to __CLIPS_MAX__).</span></label>
       <label class="cap"><input type="checkbox" id="caps"> Add captions</label>
       <label class="cap"><input type="checkbox" id="swap"> Put the person on the right on top
         <span class="hint">Only for videos with two people side by side.
@@ -1653,6 +1665,7 @@ $('go').onclick = async () => {
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ source, instructions: $('say').value,
+                           count: $('count').value.trim(),
                            captions: $('caps').checked,
                            swap: $('swap').checked })
   });
@@ -1998,7 +2011,8 @@ def _render_page() -> str:
     accepted = "".join(f"<li>{x}</li>" for x in llm.ACCEPTED_INSTRUCTIONS)
     refused = "".join(f"<li>{x}</li>" for x in llm.NOT_ACCEPTED)
     return (PAGE.replace("__ACCEPTED__", accepted)
-                .replace("__NOT_ACCEPTED__", refused))
+                .replace("__NOT_ACCEPTED__", refused)
+                .replace("__CLIPS_MAX__", str(config.CLIPS_MAX)))
 
 
 class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
