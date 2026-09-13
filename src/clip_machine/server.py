@@ -1041,6 +1041,7 @@ PAGE = r"""<!doctype html>
   .cap{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);
     cursor:pointer;flex:1 1 auto}
   .cap input{width:auto;flex:0 0 auto;accent-color:var(--accent)}
+  .opts{display:flex;flex-direction:column;gap:10px}
   .cap:has(.hint){flex-wrap:wrap;row-gap:2px}
   .cap .hint{flex-basis:100%;padding-left:24px;color:var(--muted);font-size:12px}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
@@ -1131,10 +1132,12 @@ PAGE = r"""<!doctype html>
   </div>
 
   <div class="row2">
-    <label class="cap"><input type="checkbox" id="caps"> Add captions</label>
-    <label class="cap"><input type="checkbox" id="swap"> Put the person on the right on top
-      <span class="hint">Only for videos with two people side by side.
-        Leave off otherwise.</span></label>
+    <div class="opts">
+      <label class="cap"><input type="checkbox" id="caps"> Add captions</label>
+      <label class="cap"><input type="checkbox" id="swap"> Put the person on the right on top
+        <span class="hint">Only for videos with two people side by side.
+          Leave unchecked otherwise.</span></label>
+    </div>
     <button id="go">Generate clips</button>
   </div>
 </div>
