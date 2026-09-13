@@ -66,12 +66,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         eta = source_secs / 107.0 + 40.0          # energy + rank/title calls
         if not words_cache.exists():
             eta += source_secs / 8.0              # transcription, the slow part
-        # Blank count still estimates from source length: that is roughly
-        # how many survive the quality floor, whereas the cap of 40 is not.
-        likely = config.auto_clip_count(source_secs)
-        if max_clips:
-            likely = min(max_clips, likely)
-        eta += likely * 70 * 0.24                      # rendering
+        eta += config.auto_clip_count(source_secs) * 70 * 0.24   # rendering
         print(f"      -> {source_secs/60:.0f} min of source; "
               f"about {max(1, round(eta / 60))} min to process")
 
@@ -96,33 +91,20 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     )
     print(f"      -> {'energy profile ready' if energy.ok else 'no usable audio signal'}")
 
-    # A number the user typed is a ceiling, clamped to what we allow. No
-    # number means "as many as we can": ask for the cap and let the quality
-    # floor and the no-overlap rule decide how many actually ship, rather
-    # than guessing a count from the source length.
-    asked = max_clips
-    if compile_to:
-        if max_clips is None:
+    if max_clips is None:
+        max_clips = config.auto_clip_count(float(words[-1]["end"]))
+        if compile_to:
             # Need enough ranked material to fill the target, with slack for
             # whatever the quality floor drops.
-            max_clips = max(config.auto_clip_count(float(words[-1]["end"])),
-                            int(compile_to / 25) + 4)
-    elif max_clips is None:
-        max_clips = config.CLIPS_MAX
-    max_clips = max(1, min(int(max_clips), config.CLIPS_MAX))
-    print(f"      -> pulling up to {max_clips} clips "
-          f"({words[-1]['end']/60:.0f} min of source)")
+            max_clips = max(max_clips, int(compile_to / 25) + 4)
+        print(f"      -> pulling up to {max_clips} clips "
+              f"({words[-1]['end']/60:.0f} min of source)")
 
     print(f"[4/6] Scoring clip candidates{' (+ Claude rerank)' if use_llm else ''}...")
     clips = score.find_clips(words, max_clips=max_clips, use_llm=use_llm,
                              mode_key=mode, energy=energy,
                              instructions=instructions)
     print(f"      -> {len(clips)} clips selected")
-    if asked and len(clips) < min(asked, config.CLIPS_MAX):
-        # "!" surfaces this on the page. Without it, 14 clips from a request
-        # for 20 looks like the number box was ignored.
-        print(f"! You asked for {asked} clips. This video had {len(clips)} "
-              f"good moments, so you're getting {len(clips)}.")
 
     if compile_to:
         segments = assemble.choose(clips, compile_to)
@@ -279,8 +261,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Local longform -> vertical clips.")
     p.add_argument("source", help="video URL (yt-dlp) or local file path")
     p.add_argument("--max-clips", type=int, default=None,
-                   help="most clips to make (1-40); default is as many "
-                        "good ones as the video has")
+                   help="default scales with source length (~1 per 3 min, 8-40)")
     p.add_argument("--no-llm", action="store_true",
                    help="skip Claude reranking, use heuristics only")
     p.add_argument("--compile", default=None, dest="compile_to",

@@ -62,8 +62,7 @@ ACCEPTED_INSTRUCTIONS = [
     "Title style",
 ]
 NOT_ACCEPTED = [
-    "Clip length",
-    "How many clips (use the box below)",
+    "Clip length or how many clips",
     "Layout",
     "Captions",
     "Picking a specific person",
