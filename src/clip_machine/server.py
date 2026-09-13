@@ -1387,7 +1387,7 @@ $('ftsave').onclick = async () => {
     });
     const j = await r.json();
     if (j.ok){ FOOTERS[FT_VID] = j.footer; $('ftmodal').hidden = true;
-               library(FT_VID); }
+               library(); }
   } catch (err) {}
   btn.disabled = false; btn.textContent = 'Save';
 };
@@ -1435,7 +1435,7 @@ $('edsave').onclick = async () => {
         description: $('eddesc').value})
     });
     const j = await r.json();
-    if (j.ok) { $('edmodal').hidden = true; library(ED.vid); }
+    if (j.ok) { $('edmodal').hidden = true; library(); }
     else { $('ednote').textContent = j.error || 'Could not save.';
            $('ednote').hidden = false; }
   } catch (err) {}
@@ -1740,8 +1740,8 @@ function card(c, vid){
     </div></div>`;
 }
 
-// A project is one source video. Native <details> does the collapsing, so
-// there is no toggle state to manage and it stays keyboard-accessible.
+// A project is one source video. Native <details> does the collapsing, so it
+// stays keyboard-accessible; open/closed is remembered in renderLibrary.
 function projectFolder(s, open){
   const esc = t => (t||'').replace(/[<>&]/g,'');
   const clock = n => {
@@ -1758,7 +1758,7 @@ function projectFolder(s, open){
   const name = /^https?:/i.test(src) ? src : (src.split(/[\\/]/).pop() || s.video_id);
   const rejected = Object.values(s.feedback||{}).filter(x => x==='reject').length;
 
-  return `<details class="proj" ${open?'open':''}>
+  return `<details class="proj" data-vid="${esc(s.video_id)}" ${open?'open':''}>
     <summary>
       <span class="pname">${esc(name)}</span>
       <span class="pmeta">
@@ -1782,12 +1782,36 @@ function projectFolder(s, open){
   </details>`;
 }
 
+// Folders start closed and stay however the user last left them. Every edit,
+// delete and feedback click re-renders the whole library, so without this
+// the folder a user was working in snapped shut under them.
+const OPEN_KEY = 'cyv.openProjects';
+function openSet(){
+  try { return new Set(JSON.parse(localStorage.getItem(OPEN_KEY) || '[]')); }
+  catch { return new Set(); }
+}
+function saveOpen(vid, isOpen){
+  const s = openSet();
+  isOpen ? s.add(vid) : s.delete(vid);
+  try { localStorage.setItem(OPEN_KEY, JSON.stringify([...s])); } catch {}
+}
+// 'toggle' does not bubble, so listen in the capture phase.
+document.addEventListener('toggle', e => {
+  const el = e.target;
+  if (el.classList && el.classList.contains('proj') && el.dataset.vid)
+    saveOpen(el.dataset.vid, el.open);
+}, true);
+
 function renderLibrary(sets, expand){
   sets.forEach(s => { FEEDBACK[s.video_id] = s.feedback || {};
                       PUBLISHED[s.video_id] = s.published || {};
                       FOOTERS[s.video_id] = s.footer || ''; });
+  // expand is only passed for a run that just finished - the user asked for
+  // those clips, so that one opens.
+  if (expand) saveOpen(expand, true);
+  const open = openSet();
   $('projects').innerHTML = sets
-    .map((s, i) => projectFolder(s, expand ? s.video_id === expand : i === 0))
+    .map(s => projectFolder(s, open.has(s.video_id)))
     .join('');
   $('noclips').style.display = sets.length ? 'none' : 'block';
   sets.forEach(s => updateAllBar(s.video_id));
