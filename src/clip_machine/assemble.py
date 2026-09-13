@@ -65,7 +65,8 @@ def choose(clips: list[dict], target: float) -> list[dict]:
 
 def build(video_path: Path, segments: list[dict], out_path: Path,
           layout: str = "center", look: str | None = None,
-          radius: int | None = None, work_dir: Path | None = None) -> Path:
+          radius: int | None = None, work_dir: Path | None = None,
+          swap: bool = False) -> Path:
     """Render each segment identically, then join them.
 
     Rendering with identical settings first is what lets the join be a
@@ -78,7 +79,7 @@ def build(video_path: Path, segments: list[dict], out_path: Path,
     for i, seg in enumerate(segments, 1):
         part = work / f"{out_path.stem}_part{i:02d}.mp4"
         cut.render_clip(video_path, seg["start"], seg["end"], part,
-                        layout=layout, look=look, radius=radius)
+                        layout=layout, look=look, radius=radius, swap=swap)
         parts.append(part)
 
     listing = work / f"{out_path.stem}_parts.txt"

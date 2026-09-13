@@ -21,6 +21,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         look: str | None = None, radius: int | None = None,
         compile_to: float | None = None,
         captions: bool | None = None,
+        swap: bool = False,
         on_clip=None) -> Path:
     """Longform in, vertical clips out.
 
@@ -42,6 +43,9 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     if layout == "auto":
         print("[1b/6] Detecting layout from the source...")
         layout = layout_detect.detect(video_path)
+    if swap and layout != "split":
+        # Only a side-by-side source has a top and bottom to swap.
+        print(f"      swap ignored: layout is {layout}, not side by side")
 
     want_caps = config.CAPTIONS if captions is None else captions
     asr_model = config.transcribe_model(want_caps)
@@ -110,7 +114,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
               f"{mins}:{secs:02d}...")
         out = out_dir / f"compiled_{mins}m{secs:02d}s.mp4"
         assemble.build(video_path, segments, out, layout=layout, look=look,
-                       radius=radius, work_dir=config.WORK_DIR)
+                       radius=radius, work_dir=config.WORK_DIR, swap=swap)
         thumb = cut.make_thumbnail(out, out.with_suffix(".jpg"))
 
         titled = llm.title_clips([{"duration": total,
@@ -198,7 +202,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
                 (config.OUT_WIDTH, config.OUT_HEIGHT))
         cut.render_clip(video_path, c["start"], c["end"], clip_path,
                         layout=layout, look=look, radius=radius,
-                        caption_file=cap_file)
+                        caption_file=cap_file, swap=swap)
         thumb = cut.make_thumbnail(clip_path, out_dir / f"clip_{n:02d}.jpg")
 
         print(f"      -> clip_{n:02d}.mp4  "
@@ -276,13 +280,15 @@ def main() -> None:
     p.add_argument("--layout", default="auto",
                    choices=["auto"] + list(cut.LAYOUTS),
                    help="auto detects a side-by-side source (default)")
+    p.add_argument("--swap", action="store_true",
+                   help="side-by-side sources: put the right person on top")
     args = p.parse_args()
     run(args.source, max_clips=args.max_clips, use_llm=not args.no_llm,
         mode=args.mode, layout=args.layout,
         instructions=args.instructions, look=args.look,
         radius=args.radius,
         compile_to=assemble.parse_target(args.compile_to),
-        captions=True if args.captions else None)
+        captions=True if args.captions else None, swap=args.swap)
 
 
 if __name__ == "__main__":

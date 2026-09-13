@@ -27,12 +27,16 @@ def _center(w: int, h: int) -> str:
     return f"crop='min(iw,ih*{w}/{h})':ih,scale={w}:{h},setsar=1"
 
 
-def _split(w: int, h: int) -> str:
+def _split(w: int, h: int, swap: bool = False) -> str:
+    # Left half goes on top by default. swap puts the right half on top -
+    # the user's only control over who is where, since nothing here knows
+    # which side a particular person sits on.
     hh = h // 2
+    top_x, bot_x = ("iw/2", "0") if swap else ("0", "iw/2")
     return (
-        f"[0:v]crop=iw/2:ih:0:0,scale={w}:{hh}:force_original_aspect_ratio=increase,"
+        f"[0:v]crop=iw/2:ih:{top_x}:0,scale={w}:{hh}:force_original_aspect_ratio=increase,"
         f"crop={w}:{hh},setsar=1[top];"
-        f"[0:v]crop=iw/2:ih:iw/2:0,scale={w}:{hh}:force_original_aspect_ratio=increase,"
+        f"[0:v]crop=iw/2:ih:{bot_x}:0,scale={w}:{hh}:force_original_aspect_ratio=increase,"
         f"crop={w}:{hh},setsar=1[bot];"
         f"[top][bot]vstack=inputs=2[stacked]"
     )
@@ -48,6 +52,7 @@ def render_clip(
     look: str | None = None,
     radius: int | None = None,
     caption_file: Path | None = None,
+    swap: bool = False,
 ) -> Path:
     w, h = size or (config.OUT_WIDTH, config.OUT_HEIGHT)
     duration = end - start
@@ -59,7 +64,7 @@ def render_clip(
 
     # Build the picture up to a single labelled stream, then treat and round.
     if layout == "split":
-        parts.append(_split(w, h))
+        parts.append(_split(w, h, swap))
         stream = "stacked"
     else:
         parts.append(f"[0:v]{_center(w, h)}[framed]")

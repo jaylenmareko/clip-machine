@@ -163,6 +163,7 @@ def _run_job(job: dict) -> None:
                                    use_llm=job["use_llm"], layout=job["layout"],
                                    instructions=job.get("instructions"),
                                    captions=job.get("captions"),
+                                   swap=bool(job.get("swap")),
                                    on_clip=on_clip)
         manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8-sig"))
         job["video_id"] = manifest["video_id"]
@@ -198,7 +199,7 @@ def _drain_queue() -> None:
 
 def _start_job(source: str, max_clips: int | None, use_llm: bool,
                layout: str, instructions: str | None = None,
-               captions: bool | None = None) -> dict:
+               captions: bool | None = None, swap: bool = False) -> dict:
     global _worker_alive
     with _job_lock:
         job = {
@@ -207,6 +208,7 @@ def _start_job(source: str, max_clips: int | None, use_llm: bool,
             "source": source, "video_id": None, "error": None,
             "max_clips": max_clips, "use_llm": use_llm, "layout": layout,
             "instructions": instructions, "captions": captions,
+            "swap": swap,
         }
         _jobs.append(job)
         position = sum(1 for j in _jobs if j["status"] == "queued")
@@ -787,6 +789,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data.get("layout") or "auto",
             (data.get("instructions") or "").strip() or None,
             want_caps,
+            data.get("swap") is True,
         )
         self._send_json(result, 409 if "error" in result else 200)
 
@@ -1038,6 +1041,8 @@ PAGE = r"""<!doctype html>
   .cap{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);
     cursor:pointer;flex:1 1 auto}
   .cap input{width:auto;flex:0 0 auto;accent-color:var(--accent)}
+  .cap:has(.hint){flex-wrap:wrap;row-gap:2px}
+  .cap .hint{flex-basis:100%;padding-left:24px;color:var(--muted);font-size:12px}
   .row2{display:flex;align-items:center;gap:16px;margin-top:14px;flex-wrap:wrap}
   button{background:var(--accent);color:#0a1020;border:0;border-radius:8px;
     padding:10px 20px;font:600 14px/1 inherit;cursor:pointer}
@@ -1127,6 +1132,9 @@ PAGE = r"""<!doctype html>
 
   <div class="row2">
     <label class="cap"><input type="checkbox" id="caps"> Add captions</label>
+    <label class="cap"><input type="checkbox" id="swap"> Put the person on the right on top
+      <span class="hint">Only for videos with two people side by side.
+        Leave off otherwise.</span></label>
     <button id="go">Generate clips</button>
   </div>
 </div>
@@ -1642,7 +1650,8 @@ $('go').onclick = async () => {
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ source, instructions: $('say').value,
-                           captions: $('caps').checked })
+                           captions: $('caps').checked,
+                           swap: $('swap').checked })
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
