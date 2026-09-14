@@ -289,10 +289,14 @@ def by_file(video_id: str) -> dict:
             continue
         # publishAt was recorded inside the free-text note; parse it back
         # rather than migrate the file, so older rows still read correctly.
-        when = None
+        when = privacy = None
         note = r.get("note") or ""
         if "publishAt=" in note:
             when = note.split("publishAt=", 1)[1].split()[0]
+        if "privacy=" in note:
+            privacy = note.split("privacy=", 1)[1].split()[0]
         out[f] = {"platform": r.get("platform"), "status": r.get("status"),
-                  "url": r.get("url"), "publish_at": when, "at": r.get("at")}
+                  "url": r.get("url"), "publish_at": when, "privacy": privacy,
+                  "via": "studio" if "via=studio" in note else "api",
+                  "at": r.get("at")}
     return out

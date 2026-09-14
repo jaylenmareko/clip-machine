@@ -133,11 +133,23 @@ def uploads_today() -> int:
     it - using local midnight would let a late-evening batch spend
     tomorrow's quota and fail mid-run.
     """
-    today = datetime.now(_pacific()).date().isoformat()
+    pac = _pacific()
+    today = datetime.now(pac).date()
+
+    def pacific_day(at: str):
+        # Ledger times are UTC. Comparing their date text to a Pacific date
+        # counted a 6:26pm Pacific upload (01:26 UTC) against TOMORROW.
+        try:
+            return datetime.fromisoformat(at).astimezone(pac).date()
+        except Exception:
+            return None
+
     return sum(1 for r in publish.history()
                if r.get("platform") == "youtube"
                and r.get("status") == "posted"
-               and str(r.get("at", "")).startswith(today))
+               # Studio uploads don't touch the API quota.
+               and "via=studio" not in (r.get("note") or "")
+               and pacific_day(str(r.get("at", ""))) == today)
 
 
 def check_quota_budget(n: int) -> tuple[bool, str]:

@@ -19,7 +19,10 @@ import time
 import urllib.parse
 import webbrowser
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from . import studio
 
 from . import (config, cut, llm, modes, pipeline, publish, transcribe,
                youtube)
@@ -195,6 +198,58 @@ def _drain_queue() -> None:
                 _worker_alive = False
                 return
         _run_job(nxt)
+
+
+# --------------------------------------------------------------------------
+# single-clip upload - the card's Upload button
+#
+# One at a time, in the background. The API is used while today's quota
+# lasts; after that, Studio in a visible Chrome window. The person clicks the
+# same buttons either way. Studio uploads are recorded in the ledger here,
+# tagged via=studio so they are not counted against the API quota.
+# --------------------------------------------------------------------------
+_upload_lock = threading.Lock()
+_upload: dict = {"status": "idle"}
+
+
+def _upload_worker(vid: str, clip: dict, footer: str, publish_at) -> None:
+    path = config.CLIPS_DIR / vid / clip["file"]
+    title = publish.youtube_title(clip.get("title", ""))
+    desc = publish.full_description(clip, footer)
+    tags = publish.hashtag_list(clip.get("title", ""))
+    cid = publish.clip_id(vid, clip.get("start", -1))
+
+    def step(msg: str) -> None:
+        _upload["message"] = msg
+
+    try:
+        if (youtube.configured()
+                and youtube.uploads_today() < youtube.MAX_UPLOADS_PER_DAY):
+            _upload["via"] = "api"
+            step("Uploading to YouTube…")
+            # upload() writes its own ledger row, success or failure.
+            res = youtube.upload(path, title, desc, privacy="public",
+                                 video_id=vid, clip_id=cid, tags=tags,
+                                 publish_at=publish_at)
+        else:
+            _upload["via"] = "studio"
+            step("Opening YouTube Studio in Chrome…")
+            res = studio.upload(path, title, desc, tags,
+                                publish_at=publish_at, on_step=step)
+            note = "via=studio privacy=" + ("private" if publish_at else "public")
+            if publish_at:
+                note += " publishAt=" + publish_at.astimezone(
+                    timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            publish.record(vid, cid, clip["file"], "youtube", "posted",
+                           url=res.get("url"), note=note)
+        _upload.update(status="done", url=res.get("url"), message="Done")
+    except Exception as e:
+        if _upload.get("via") == "studio":
+            publish.record(vid, cid, clip["file"], "youtube", "failed",
+                           note=f"via=studio {type(e).__name__}: {e}"[:300])
+        msg = (str(e) if isinstance(e, studio.StudioError)
+               else f"Upload didn't finish: {type(e).__name__}: {e}")
+        _upload.update(status="error", message=msg[:300])
 
 
 def _start_job(source: str, max_clips: int | None, use_llm: bool,
@@ -533,6 +588,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
         elif route == "/api/library":
             self._send_json(_library())
+        elif route == "/api/upload/status":
+            left = max(0, youtube.MAX_UPLOADS_PER_DAY - youtube.uploads_today())
+            self._send_json({**_upload, "api_left": left})
         elif route.startswith("/bundle/"):
             vid = urllib.parse.unquote(route[len("/bundle/"):]).strip("/")
             if not vid or "/" in vid or ".." in vid:
@@ -584,7 +642,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         if path not in ("/api/run", "/api/feedback",
                         "/api/youtube", "/api/youtube/plan",
-                        "/api/clip", "/api/project", "/api/delete"):
+                        "/api/clip", "/api/project", "/api/delete",
+                        "/api/upload"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -692,6 +751,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
             self._send_json({"ok": True, "clip": hit})
+            return
+
+        if path == "/api/upload":
+            vid = (data.get("video_id") or "").strip()
+            file = (data.get("file") or "").strip()
+            if (not vid or not file or "/" in file + vid
+                    or chr(92) in file + vid or ".." in file + vid):
+                self._send_json({"error": "Couldn't tell which clip that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            clip = next((c for c in man.get("clips", [])
+                         if c.get("file") == file), None)
+            if clip is None:
+                self._send_json({"error": "no such clip"}, 404)
+                return
+            if (publish.by_file(vid).get(file) or {}).get("status") == "posted":
+                self._send_json({"error": "This clip is already on YouTube."}, 409)
+                return
+
+            publish_at = None
+            if data.get("mode") == "schedule":
+                try:
+                    publish_at = datetime.fromisoformat(str(data.get("when")))
+                except (TypeError, ValueError):
+                    publish_at = None
+                if publish_at is None or publish_at.tzinfo is None:
+                    self._send_json({"error": "Pick a date and time."}, 400)
+                    return
+                # Both Studio and the API reject a time too close to now.
+                if publish_at < datetime.now(timezone.utc) + timedelta(minutes=15):
+                    self._send_json(
+                        {"error": "Pick a time at least 15 minutes from now."}, 400)
+                    return
+
+            with _upload_lock:
+                if _upload.get("status") == "running":
+                    self._send_json({"error": "Another clip is uploading. "
+                                              "Wait for it to finish."}, 409)
+                    return
+                _upload.clear()
+                _upload.update(status="running", vid=vid, file=file, via=None,
+                               url=None, message="Starting…",
+                               started=time.time())
+            threading.Thread(target=_upload_worker,
+                             args=(vid, clip, man.get("footer", ""), publish_at),
+                             daemon=True).start()
+            self._send_json({"ok": True})
             return
 
         if path == "/api/youtube/plan":
@@ -875,6 +986,13 @@ PAGE = r"""<!doctype html>
   /* Keep was removed - a clip is kept unless it is rejected, so the button
      asserted a state that was already the default. Reject is the only verdict
      now, and it reads red rather than neutral-grey. */
+  .vote button.up{color:#0a1020;background:var(--accent);border-color:var(--accent);
+    font-weight:600}
+  .vote button.up:hover{color:#0a1020;border-color:var(--accent);filter:brightness(1.12)}
+  .uptitle{margin:0 0 16px;font-size:14px;line-height:1.45}
+  .upwhen input{width:100%;margin:4px 0 12px;background:#0f131b;color:var(--text);
+    border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;
+    color-scheme:dark}
   .vote button.edit{color:var(--muted);border-color:transparent;font-weight:500}
   .vote button.edit:hover{color:var(--text);border-color:var(--line);
     background:#161d2a}
@@ -1206,6 +1324,39 @@ PAGE = r"""<!doctype html>
   </div>
 </div>
 
+<div class="modal" id="upmodal" hidden>
+  <div class="sheet">
+    <div id="upstep1">
+      <h3>Upload this clip to YouTube?</h3>
+      <p class="uptitle" id="uptitle"></p>
+      <div class="ytacts">
+        <button class="btn ghost" id="upcancel">Cancel</button>
+        <button class="btn" id="upnext">Yes, continue</button>
+      </div>
+    </div>
+    <div id="upstep2" hidden>
+      <h3>When should it go live?</h3>
+      <button class="pick" id="upnow">
+        <b>Post now</b>
+        <span>Public as soon as it's uploaded</span>
+      </button>
+      <button class="pick" id="upsched">
+        <b>Schedule</b>
+        <span>Pick a date and time</span>
+      </button>
+      <div class="upwhen" id="upwhenrow" hidden>
+        <input type="datetime-local" id="upwhen">
+        <button class="btn" id="upgo">Schedule it</button>
+      </div>
+      <p class="ytnote" id="upvia" hidden></p>
+      <p class="ytleft" id="uperr" hidden></p>
+      <div class="ytacts">
+        <button class="btn ghost" id="upback">Back</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="dlmodal" hidden>
   <div class="sheet">
     <h3>Download</h3>
@@ -1453,6 +1604,96 @@ $('edsave').onclick = async () => {
   btn.disabled = false; btn.textContent = 'Save';
 };
 
+// Upload one clip: confirm first, then choose now or scheduled. Runs in the
+// background on the server; the card shows UPLOADING until it finishes.
+let UP = {vid: null, file: null};
+let UP_TIMER = null;
+let UP_WATCHING = false;     // only report a finish this page actually started
+function upStep(n){ $('upstep1').hidden = n !== 1; $('upstep2').hidden = n !== 2; }
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button[data-up]');
+  if (!b) return;
+  UP = {vid: b.dataset.vid, file: b.dataset.up};
+  const card = b.closest('.clip');
+  $('uptitle').textContent = card.querySelector('.hook')?.title || UP.file;
+  $('uperr').hidden = true;
+  $('upwhenrow').hidden = true;
+  $('upvia').hidden = true;
+  upStep(1);
+  $('upmodal').hidden = false;
+  try {
+    const s = await (await fetch('/api/upload/status')).json();
+    if (s.api_left === 0) {
+      $('upvia').textContent = "Today's automatic uploads are used up, so a Chrome "
+        + "window will open and upload it through YouTube Studio. Leave that "
+        + "window alone until it's done.";
+      $('upvia').hidden = false;
+    }
+  } catch (err) {}
+});
+$('upcancel').onclick = () => { $('upmodal').hidden = true; };
+$('upmodal').onclick = e => { if (e.target === $('upmodal')) $('upmodal').hidden = true; };
+$('upnext').onclick = () => upStep(2);
+$('upback').onclick = () => { $('upwhenrow').hidden = true; upStep(1); };
+$('upsched').onclick = () => {
+  // Default: the next whole hour after an hour from now.
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  d.setMinutes(0, 0, 0); d.setHours(d.getHours() + 1);
+  const p = n => String(n).padStart(2, '0');
+  $('upwhen').value = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+  $('upwhenrow').hidden = false;
+};
+$('upnow').onclick = () => startUpload('now');
+$('upgo').onclick = () => {
+  if (!$('upwhen').value) { $('upwhen').focus(); return; }
+  startUpload('schedule', new Date($('upwhen').value).toISOString());
+};
+async function startUpload(mode, when){
+  $('uperr').hidden = true;
+  let j = {};
+  try {
+    const r = await fetch('/api/upload', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: UP.vid, file: UP.file, mode, when})
+    });
+    j = await r.json();
+  } catch (err) { j = {error: 'Could not reach the app.'}; }
+  if (!j.ok) {
+    $('uperr').textContent = j.error || 'Could not start the upload.';
+    $('uperr').hidden = false;
+    return;
+  }
+  $('upmodal').hidden = true;
+  UP_WATCHING = true;
+  pollUpload();
+}
+async function pollUpload(){
+  clearTimeout(UP_TIMER);
+  let s;
+  try { s = await (await fetch('/api/upload/status')).json(); }
+  catch (err) { UP_TIMER = setTimeout(pollUpload, 3000); return; }
+  const card = s.vid && document.querySelector(
+    `.clip[data-vid="${CSS.escape(s.vid)}"][data-file="${CSS.escape(s.file)}"]`);
+  const media = card && card.querySelector('.media');
+  let tag = media && media.querySelector('.stamp.upl');
+  if (s.status === 'running') {
+    if (media && !tag) {
+      tag = document.createElement('div');
+      tag.className = 'stamp soon upl';
+      tag.innerHTML = '<b>UPLOADING</b><span></span>';
+      media.appendChild(tag);
+    }
+    if (tag) tag.querySelector('span').textContent = s.message || '';
+    UP_TIMER = setTimeout(pollUpload, 2000);
+    return;
+  }
+  if (tag) tag.remove();
+  if (!UP_WATCHING) return;
+  UP_WATCHING = false;
+  if (s.status === 'error') alert(s.message || 'The upload did not finish.');
+  library();
+}
+
 // Download: one button, two choices in a sheet. Two buttons side by side
 // made the user weigh a decision before knowing what either meant.
 let DL_VID = null;
@@ -1678,7 +1919,8 @@ function splitTitle(s){
 // accidental uploads sat unnoticed among sixteen identical cards.
 function pubState(p){
   if (!p || p.status !== 'posted') return 'bad';
-  if (!p.publish_at) return 'priv';
+  // A "Post now" upload is public with no publish time.
+  if (!p.publish_at) return p.privacy === 'public' ? 'done' : 'priv';
   return new Date(p.publish_at) > new Date() ? 'soon' : 'done';
 }
 function pubWord(p){
@@ -1689,7 +1931,7 @@ function pubWhen(p){
   const st = pubState(p);
   if (st === 'bad') return 'upload did not complete';
   if (st === 'priv') return 'private, no publish date';
-  const d = new Date(p.publish_at);
+  const d = new Date(p.publish_at || p.at);
   return d.toLocaleString([], {weekday:'short', day:'numeric', month:'short',
     hour:'numeric', minute:'2-digit'});
 }
@@ -1739,6 +1981,7 @@ function card(c, vid){
         <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
       </div>
       <div class="vote">
+        ${live ? '' : `<button class="up" data-up="${esc(c.file)}" data-vid="${esc(vid)}">Upload</button>`}
         <button class="edit" data-edit="${esc(c.file)}" data-vid="${esc(vid)}">Edit</button>
         <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Removed · undo':'Remove'}</button>
       </div>
@@ -1987,7 +2230,7 @@ async function poll(){
   setTimeout(poll, 1000);  // whole UI after a removed element left a dead ref
 
 }
-library(); poll();
+library(); poll(); pollUpload();
 </script>
 </div></body></html>
 """
