@@ -120,7 +120,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         titled = llm.title_clips([{"duration": total,
                                    "text": " ".join(c["text"] for c in segments)}],
                                  instructions=instructions)
-        titles, descs = titled if titled else ({}, {})
+        titles, descs, _tags = titled if titled else ({}, {}, {})
         manifest = [{
             "file": out.name,
             "thumb": thumb.name if thumb else None,
@@ -150,7 +150,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
     # House-style titles for the final picks; falls back to the hook line.
     titled = llm.title_clips(clips, instructions=instructions)
-    titles, descs = titled if titled else ({}, {})
+    titles, descs, _tags = titled if titled else ({}, {}, {})
     for i, c in enumerate(clips):
         c["title_text"] = titles.get(i) or c["hook"]
         c["description"] = descs.get(i, "")

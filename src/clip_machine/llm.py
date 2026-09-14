@@ -219,6 +219,12 @@ use the correct spelling.
 THE DESCRIPTION
 Each clip also gets a short description - the caption body that sits under
 the title on an upload. Two or three sentences, 200-320 characters.
+- OPEN WITH WHAT SOMEONE WOULD SEARCH FOR. The first few words carry the
+  most weight in search, so lead with the concrete subjects of the clip -
+  the faiths, places, people, events or ideas it is about - not with
+  scene-setting. "A comparison is drawn to..." spends the most valuable
+  words on nothing. Then say what happens. Write it as a real sentence,
+  never a comma-separated keyword list.
 - It must ADD to the title, never restate it. If the title is the takeaway,
   the description is what happens in the clip that gets you there: the
   example, the story, the reasoning.
@@ -228,14 +234,20 @@ the title on an upload. Two or three sentences, 200-320 characters.
   the transcript.
 
   Title:       "At a certain price you're paying for what's kept out"
-  Description: "Someone insists a four-star hotel has no laundry room, and
-                gets pushback that every hotel does. The point is what the
-                stars are actually buying - nobody paying $500 a night
-                wants to watch a guest carry laundry through the elevator."
+  Description: "Luxury hotels and what a four-star rating really sells:
+                someone insists there is no laundry room, and gets pushback
+                that every hotel has one. Nobody paying $500 a night wants to
+                watch a guest carry laundry through the elevator."
+
+THE TAGS
+Separately, give every clip 3-6 tags from the same vocabulary as the title
+hashtags - always, whichever title shape you chose. They are sent to YouTube
+as search tags, and they fill in any title that ends up without hashtags.
 
 Return ONLY JSON:
   {"titles":       {"<clip number>": "<title with hashtags>", ...},
-   "descriptions": {"<clip number>": "<2-3 plain sentences>", ...}}"""
+   "descriptions": {"<clip number>": "<2-3 plain sentences>", ...},
+   "tags":         {"<clip number>": ["#tag", "#tag", "#tag"], ...}}"""
 
 
 # One request covering 22 clips came back at 3830 output tokens against a
@@ -285,10 +297,30 @@ def _salvage_titles(text: str, key: str = "titles") -> dict:
     return out
 
 
+def _with_hashtags(title: str, tags: list[str], limit: int = 100) -> str:
+    """Give a bare title its hashtags, staying inside YouTube's 100 chars.
+
+    The prompt asks for hashtags on every title and the model still skipped
+    them for a whole batch - eight consecutive titles on a real run - with
+    nothing downstream noticing. So the tags come back as their own field
+    and are applied here, in code, whenever a title arrives without any.
+    """
+    if "#" in title or not tags:
+        return title
+    out = title.rstrip()
+    for t in tags:
+        t = "#" + str(t).strip().lstrip("#")
+        if len(t) < 2 or len(out) + 1 + len(t) > limit:
+            continue
+        out += " " + t
+    return out
+
+
 def _title_batch(client, clips: list[dict], offset: int,
                  instructions: str | None
-                 ) -> tuple[dict[int, str], dict[int, str], int, int]:
-    """Title one batch. Returns (titles, descriptions, in_tokens, out)."""
+                 ) -> tuple[dict[int, str], dict[int, str],
+                            dict[int, list[str]], int, int]:
+    """Title one batch. Returns (titles, descriptions, tags, in_tokens, out)."""
     listing = "\n\n".join(
         f"[{offset + n}] ({c['duration']:.0f}s) {c['text'][:900]}"
         for n, c in enumerate(clips)
@@ -299,10 +331,11 @@ def _title_batch(client, clips: list[dict], offset: int,
         f"{len(clips)} clips."
         + _instruction_block(instructions, "how the titles are written")
         + f"\n\n{listing}\n\n"
-        + f"Return ONLY JSON, with a title AND a description for every one "
-          f"of these clip numbers ({numbers}):\n"
-        + ('{"titles": {"%d": "..."}, "descriptions": {"%d": "..."}}'
-           % (offset, offset))
+        + f"Return ONLY JSON, with a title, a description AND tags for every "
+          f"one of these clip numbers ({numbers}):\n"
+        + ('{"titles": {"%d": "..."}, "descriptions": {"%d": "..."}, '
+           '"tags": {"%d": ["#...", "#...", "#..."]}}'
+           % (offset, offset, offset))
     )
 
     kwargs = {
@@ -326,7 +359,7 @@ def _title_batch(client, clips: list[dict], offset: int,
 
     if getattr(response, "stop_reason", None) == "refusal":
         print("      (Claude declined to title one batch)")
-        return {}, {}, 0, 0
+        return {}, {}, {}, 0, 0
 
     text = "".join(
         b.text for b in response.content if getattr(b, "type", None) == "text"
@@ -364,19 +397,39 @@ def _title_batch(client, clips: list[dict], offset: int,
                 got[idx] = v.strip()
         return got
 
+    def collect_tags(src) -> dict[int, list[str]]:
+        got: dict[int, list[str]] = {}
+        if not isinstance(src, dict):
+            return got
+        for k, v in src.items():
+            try:
+                idx = int(k)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(v, str):
+                v = v.split()
+            if lo <= idx < hi and isinstance(v, list):
+                clean = [str(t).strip() for t in v if str(t).strip().lstrip("#")]
+                if clean:
+                    got[idx] = clean
+        return got
+
     used = getattr(response, "usage", None)
     return (collect(titles), collect(descs),
+            collect_tags((data or {}).get("tags")),
             used.input_tokens if used else 0,
             used.output_tokens if used else 0)
 
 
 def title_clips(clips: list[dict], instructions: str | None = None
-                ) -> tuple[dict[int, str], dict[int, str]] | None:
+                ) -> tuple[dict[int, str], dict[int, str],
+                           dict[int, list[str]]] | None:
     """Title and describe each clip.
 
-    Returns ({index: title}, {index: description}) or None. Both come from
-    one call per batch - the model needs the clip in front of it either way,
-    and a second pass would double the cost to re-read the same transcript.
+    Returns ({index: title}, {index: description}, {index: [tags]}) or None.
+    All come from one call per batch - the model needs the clip in front of
+    it either way, and a second pass would double the cost to re-read the
+    same transcript. Titles are returned with hashtags already guaranteed.
     """
     if not clips:
         return None
@@ -389,15 +442,24 @@ def title_clips(clips: list[dict], instructions: str | None = None
         client = anthropic.Anthropic()
         out: dict[int, str] = {}
         descs: dict[int, str] = {}
+        tags: dict[int, list[str]] = {}
         tin = tout = 0
         for offset in range(0, len(clips), TITLES_PER_CALL):
             batch = clips[offset:offset + TITLES_PER_CALL]
-            got, gotd, i_tok, o_tok = _title_batch(client, batch, offset,
-                                                   instructions)
+            got, gotd, gott, i_tok, o_tok = _title_batch(client, batch, offset,
+                                                         instructions)
             out.update(got)
             descs.update(gotd)
+            tags.update(gott)
             tin += i_tok
             tout += o_tok
+
+        bare = [n for n, t in out.items() if "#" not in t and tags.get(n)]
+        for n in bare:
+            out[n] = _with_hashtags(out[n], tags[n])
+        if bare:
+            print(f"      ! {len(bare)} title{'' if len(bare) == 1 else 's'} came "
+                  f"back without hashtags; added them from the clip's tags")
 
         calls = (len(clips) + TITLES_PER_CALL - 1) // TITLES_PER_CALL
         print(f"      titled by {TITLE_MODEL} "
@@ -417,7 +479,7 @@ def title_clips(clips: list[dict], instructions: str | None = None
             print(f"      ! no description for clip"
                   f"{'' if len(nodesc) == 1 else 's'} "
                   f"{', '.join(str(m + 1) for m in nodesc)}")
-        return (out, descs) if out else None
+        return (out, descs, tags) if out else None
 
     except Exception as e:
         detail = " ".join(str(e).split())[:200]

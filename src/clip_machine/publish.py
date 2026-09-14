@@ -127,6 +127,33 @@ def full_description(clip: dict, footer: str = "") -> str:
     return f"{body}\n\n{foot}" if body else foot
 
 
+def hashtag_list(title: str) -> list[str]:
+    """YouTube tags from a title's hashtags: '... #gaza #iran' -> ['gaza', 'iran'].
+
+    The title is the one place hashtags are stored and edited, so tags are
+    derived from it rather than kept as a second copy that can drift.
+    """
+    _, tags = split_title(title)
+    return [t.lstrip("#") for t in tags.split() if len(t.lstrip("#")) > 0]
+
+
+def youtube_title(title: str, limit: int = 100) -> str:
+    """Fit a title to YouTube's 100 characters without halving a hashtag.
+
+    Plain slicing turned '#palestine' into '#pales' on real titles. Whole
+    hashtags are dropped from the end instead; the dropped ones still reach
+    YouTube as tags.
+    """
+    t = (title or "").strip()
+    if len(t) <= limit:
+        return t
+    text, tags = split_title(t)
+    words = tags.split()
+    while words and len(f"{text} {' '.join(words)}".strip()) > limit:
+        words.pop()
+    return f"{text} {' '.join(words)}".strip()[:limit]
+
+
 def build_queue(video_id: str, clips: list[dict], source: str = "",
                 platforms=PLATFORMS, footer: str = "") -> dict:
     """The publish plan. This is the file a worker would read."""

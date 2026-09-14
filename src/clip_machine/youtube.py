@@ -320,10 +320,12 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
     for (cid, c), when in zip(batch, times):
         path = clip_dir / c["file"]
         try:
-            res = upload(path, c.get("title", "")[:100],
+            res = upload(path, publish.youtube_title(c.get("title", "")),
                          publish.full_description(c, footer),
                          privacy="private",
-                         video_id=video_id, clip_id=cid, publish_at=when)
+                         video_id=video_id, clip_id=cid,
+                         tags=publish.hashtag_list(c.get("title", "")),
+                         publish_at=when)
             done.append({"file": c["file"], "url": res["url"],
                          "publish_at": res.get("publish_at"),
                          "title": c.get("title", "")})
