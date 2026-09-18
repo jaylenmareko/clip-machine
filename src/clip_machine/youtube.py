@@ -398,4 +398,14 @@ def plan(clips: list[dict], video_id: str, gap_hours: float = 4.0,
              "when": t.isoformat()}
             for c, t in zip(now_batch, times)
         ],
+        # Everything else that COULD be scheduled but does not fit today.
+        # The sheet shows these so a clip can be swapped into a slot -
+        # otherwise the only way to pick a different six was to remove
+        # clips from the project.
+        "waiting": [
+            {"file": c["file"],
+             "title": (c.get("title") or "").split("#")[0].strip(),
+             "when": None}
+            for c in todo[room:]
+        ],
     }

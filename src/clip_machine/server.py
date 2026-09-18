@@ -829,6 +829,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 minute = max(0, min(59, int(data.get("minute") or 0)))
             except (TypeError, ValueError):
                 gap, hour, minute = 4.0, 9, 0
+            # Same ordering rule as the real upload, so the preview and the
+            # upload agree about which clips take the slots.
+            order = data.get("order") or []
+            if isinstance(order, list) and order:
+                rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
+                picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
             self._send_json(youtube.plan(picked, vid, gap_hours=gap,
                                          hour=hour, minute=minute))
             return
@@ -1116,6 +1122,14 @@ PAGE = r"""<!doctype html>
     border:1px solid transparent;border-radius:7px;cursor:grab;
     background:#0f131b;margin-bottom:4px}
   .ytlist li:hover{border-color:var(--line)}
+  .ytlist li.waiting{opacity:.6}
+  .ytlist li.waiting .sl-when{font-style:italic}
+  .ytlist li.sl-split{justify-content:center;background:transparent;border:0;
+    color:var(--muted);font-size:11.5px;padding:8px 0 4px;cursor:default}
+  .sl-move{margin-left:auto;flex:0 0 auto;background:transparent;
+    border:1px solid var(--line);border-radius:6px;color:var(--muted);
+    font:inherit;font-size:11.5px;padding:3px 9px;cursor:pointer}
+  .sl-move:hover{color:var(--text);border-color:#39435a}
   .ytlist li.dragging{opacity:.55;border-color:var(--accent);cursor:grabbing}
   .grip{color:#4d5a70;letter-spacing:-3px;font-size:15px;flex:0 0 auto;
     line-height:1}
@@ -1389,7 +1403,7 @@ PAGE = r"""<!doctype html>
       <label>starting at <input id="ythour" type="time" value="09:00"></label>
     </div>
     <p class="ytsum" id="ytsum">Working it out…</p>
-    <p class="draghint" id="draghint" hidden>Drag to change the order</p>
+    <p class="draghint" id="draghint" hidden>Drag to change the order, or use <b>Take off</b> and <b>Add</b> to choose which ones go today</p>
     <ol class="ytlist" id="ytlist"></ol>
     <p class="ytleft" id="ytleft" hidden></p>
     <p class="ytnote">Each video uploads private and YouTube makes it public
@@ -1723,32 +1737,56 @@ let YT_VID = null;
 let YT_SLOTS = [];      // publish times, fixed
 let YT_ORDER = [];      // which clip sits in each slot, draggable
 
+// Every clip that COULD go out is listed: the first few sit in today's
+// slots, the rest wait below. A clip moves between the two groups by drag
+// or by its own button, so picking a different six no longer means removing
+// clips from the project.
 function ytDraw(){
-  $('ytlist').innerHTML = YT_ORDER.map((c, i) => {
-    const d = new Date(YT_SLOTS[i]);
-    const when = d.toLocaleString([], {weekday:'short', day:'numeric',
-      month:'short', hour:'numeric', minute:'2-digit'});
-    return `<li draggable="true" data-i="${i}">`
+  const n = YT_SLOTS.length;
+  const rows = YT_ORDER.map((c, i) => {
+    const inSlot = i < n;
+    const when = inSlot
+      ? new Date(YT_SLOTS[i]).toLocaleString([], {weekday:'short', day:'numeric',
+          month:'short', hour:'numeric', minute:'2-digit'})
+      : 'waiting';
+    return `<li draggable="true" data-i="${i}"${inSlot?'':' class="waiting"'}>`
       + `<span class="grip" aria-hidden="true">&#8942;&#8942;</span>`
-      + `<span class="slot">${i + 1}</span>`
+      + `<span class="slot">${inSlot ? i + 1 : '&middot;'}</span>`
       + `<span class="sl-when">${when}</span>`
       + `<span class="sl-title">${c.title.replace(/[<>&]/g,'').slice(0,60)}</span>`
+      + `<button class="sl-move" data-move="${i}">${inSlot ? 'Take off' : 'Add'}</button>`
       + `</li>`;
-  }).join('');
+  });
+  if (n && YT_ORDER.length > n)
+    rows.splice(n, 0, `<li class="sl-split">Not today &mdash; `
+      + `${YT_ORDER.length - n} waiting for the next reset</li>`);
+  $('ytlist').innerHTML = rows.join('');
 }
+
+// Take off / Add: one click moves a clip out of today's slots or into the
+// last one, pushing whatever was there into the waiting group.
+document.addEventListener('click', e => {
+  const b = e.target.closest('#ytlist button[data-move]');
+  if (!b) return;
+  const i = +b.dataset.move, n = YT_SLOTS.length;
+  const [c] = YT_ORDER.splice(i, 1);
+  if (i < n) YT_ORDER.push(c);
+  else YT_ORDER.splice(Math.max(0, n - 1), 0, c);
+  ytDraw();
+});
 
 // Native HTML5 drag - no library, and the list is at most six rows.
 let DRAG_FROM = null;
 document.addEventListener('dragstart', e => {
   const li = e.target.closest('#ytlist li');
-  if (!li) return;
+  if (!li || li.dataset.i === undefined) return;
   DRAG_FROM = +li.dataset.i;
   li.classList.add('dragging');
   e.dataTransfer.effectAllowed = 'move';
 });
 document.addEventListener('dragover', e => {
   const li = e.target.closest('#ytlist li');
-  if (!li || DRAG_FROM === null) return;
+  if (!li || li.dataset.i === undefined || DRAG_FROM === null) return;
   e.preventDefault();                      // required or drop never fires
   const to = +li.dataset.i;
   if (to === DRAG_FROM) return;
@@ -1830,7 +1868,8 @@ async function ytRefresh(){
     // between slots. So slot 1 is always the earliest and reordering is
     // "what opens", not "when does this one go" - one idea, not two.
     YT_SLOTS = j.items.map(it => it.when);
-    YT_ORDER = j.items.map(it => ({file: it.file, title: it.title || ''}));
+    YT_ORDER = j.items.concat(j.waiting || [])
+      .map(it => ({file: it.file, title: it.title || ''}));
     $('draghint').hidden = YT_ORDER.length < 2;
     ytDraw();
     go.textContent = `Upload ${j.will_upload}`;
