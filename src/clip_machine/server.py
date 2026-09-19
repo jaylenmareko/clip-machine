@@ -200,6 +200,19 @@ def _drain_queue() -> None:
         _run_job(nxt)
 
 
+def _start_date(raw) -> str | None:
+    """A "YYYY-MM-DD" from the sheet, never earlier than today.
+
+    None means "tomorrow", which is what scheduling did before the sheet
+    had a date picker.
+    """
+    try:
+        want = datetime.fromisoformat(str(raw)).date()
+    except (TypeError, ValueError):
+        return None
+    return max(want, datetime.now().astimezone().date()).isoformat()
+
+
 # --------------------------------------------------------------------------
 # single-clip upload - the card's Upload button
 #
@@ -836,7 +849,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 rank = {f: i for i, f in enumerate(order) if isinstance(f, str)}
                 picked.sort(key=lambda c: rank.get(c.get("file"), len(rank)))
             self._send_json(youtube.plan(picked, vid, gap_hours=gap,
-                                         hour=hour, minute=minute))
+                                         hour=hour, minute=minute,
+                                         start_date=_start_date(
+                                             data.get("start_date"))))
             return
 
         if path == "/api/youtube":
@@ -885,7 +900,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             result = youtube.schedule_batch(
                 picked, config.CLIPS_DIR / vid, vid,
                 gap_hours=gap, hour=hour, minute=minute,
-                footer=man.get("footer", ""))
+                footer=man.get("footer", ""),
+                start_date=_start_date(data.get("start_date")))
             self._send_json(result)
             return
 
@@ -996,6 +1012,7 @@ PAGE = r"""<!doctype html>
     font-weight:600}
   .vote button.up:hover{color:#0a1020;border-color:var(--accent);filter:brightness(1.12)}
   .uptitle{margin:0 0 16px;font-size:14px;line-height:1.45}
+  .ytrow input[type=date]{color-scheme:dark}
   .upwhen input{width:100%;margin:4px 0 12px;background:#0f131b;color:var(--text);
     border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;
     color-scheme:dark}
@@ -1400,7 +1417,8 @@ PAGE = r"""<!doctype html>
         <option value="8">8 hours</option>
         <option value="24">day</option>
       </select></label>
-      <label>starting at <input id="ythour" type="time" value="09:00"></label>
+      <label>starting <input id="ytdate" type="date"></label>
+      <label>at <input id="ythour" type="time" value="09:00"></label>
     </div>
     <p class="ytsum" id="ytsum">Working it out…</p>
     <p class="draghint" id="draghint" hidden>Drag to change the order, or use <b>Take off</b> and <b>Add</b> to choose which ones go today</p>
@@ -1492,6 +1510,13 @@ document.addEventListener('click', async e => {
   const b = e.target.closest('button[data-yt]');
   if (!b) return;
   YT_VID = b.dataset.yt;
+  // Default TODAY, not tomorrow. Scheduling used to jump to tomorrow with
+  // nothing on screen saying so, which put a batch meant for today a day out.
+  const now = new Date();
+  const p2 = n => String(n).padStart(2, '0');
+  const today = `${now.getFullYear()}-${p2(now.getMonth()+1)}-${p2(now.getDate())}`;
+  $('ytdate').min = today;
+  if (!$('ytdate').value || $('ytdate').value < today) $('ytdate').value = today;
   $('ytmodal').hidden = false;
   ytRefresh();
 });
@@ -1805,7 +1830,8 @@ document.addEventListener('dragend', () => {
 function ytOpts(){
   const [h, m] = ($('ythour').value || '09:00').split(':').map(Number);
   return {gap_hours: parseFloat($('ytgap').value) || 4,
-          hour: h || 0, minute: m || 0};
+          hour: h || 0, minute: m || 0,
+          start_date: $('ytdate').value || null};
 }
 
 async function ytRefresh(){
@@ -1879,6 +1905,7 @@ async function ytRefresh(){
 
 $('ytgap').onchange = ytRefresh;
 $('ythour').onchange = ytRefresh;
+$('ytdate').onchange = ytRefresh;
 $('ytcancel').onclick = () => { $('ytmodal').hidden = true; };
 $('ytmodal').onclick = e => {
   if (e.target === $('ytmodal')) $('ytmodal').hidden = true;

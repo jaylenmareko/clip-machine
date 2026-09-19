@@ -29,7 +29,7 @@ Secrets: the client secrets JSON and the stored token live under
 school tenant syncs everything in the project tree.
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config, publish
@@ -273,8 +273,13 @@ def slots_per_day(gap_hours: float, span_hours: int = SPAN_HOURS) -> int:
 
 def plan_times(n: int, gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
                minute: int = 0, start_days: int = 1, tz=None,
-               span_hours: int = SPAN_HOURS) -> list:
-    """Publish times for n clips, `gap_hours` apart, starting tomorrow.
+               span_hours: int = SPAN_HOURS, start_date=None) -> list:
+    """Publish times for n clips, `gap_hours` apart.
+
+    `start_date` (a date or "YYYY-MM-DD") is the first day. Without one it
+    falls back to tomorrow, which is what this did for everyone before the
+    sheet had a date picker - and which quietly pushed a batch meant for
+    today onto tomorrow.
 
     The GAP is the input now, and posts-per-day falls out of it. It was the
     other way round - pick a count, have the spacing derived - which meant
@@ -293,8 +298,14 @@ def plan_times(n: int, gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
     now = datetime.now(tz)
     gap = max(0.25, float(gap_hours))
     per_day = slots_per_day(gap, span_hours)
-    base = (now + timedelta(days=start_days)).replace(
-        hour=hour, minute=minute, second=0, microsecond=0)
+    if start_date is not None:
+        if isinstance(start_date, str):
+            start_date = date.fromisoformat(start_date)
+        base = datetime(start_date.year, start_date.month, start_date.day,
+                        hour, minute, tzinfo=tz)
+    else:
+        base = (now + timedelta(days=start_days)).replace(
+            hour=hour, minute=minute, second=0, microsecond=0)
     out = []
     for i in range(n):
         day, slot = divmod(i, per_day)
@@ -308,7 +319,7 @@ def plan_times(n: int, gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
 def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
                    gap_hours: float = 4.0, hour: int = DEFAULT_HOUR,
                    minute: int = 0, privacy_after: str = "public",
-                   footer: str = "") -> dict:
+                   footer: str = "", start_date=None) -> dict:
     """Upload as many clips as today's quota allows, each with a publish time.
 
     Returns what happened, including what did NOT fit - a scheduler that
@@ -327,7 +338,7 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
     batch, deferred = todo[:room], todo[room:]
 
     times = plan_times(len(batch), gap_hours=gap_hours, hour=hour,
-                       minute=minute)
+                       minute=minute, start_date=start_date)
     done, failed = [], []
     for (cid, c), when in zip(batch, times):
         path = clip_dir / c["file"]
@@ -355,7 +366,7 @@ def schedule_batch(clips: list[dict], clip_dir: Path, video_id: str,
 
 
 def plan(clips: list[dict], video_id: str, gap_hours: float = 4.0,
-         hour: int = DEFAULT_HOUR, minute: int = 0) -> dict:
+         hour: int = DEFAULT_HOUR, minute: int = 0, start_date=None) -> dict:
     """What schedule_batch WOULD do. Uploads nothing.
 
     Exists so the confirm dialog can show real dates before anything
@@ -370,7 +381,7 @@ def plan(clips: list[dict], video_id: str, gap_hours: float = 4.0,
     room = max(0, MAX_UPLOADS_PER_DAY - used)
     now_batch = todo[:room]
     times = plan_times(len(now_batch), gap_hours=gap_hours, hour=hour,
-                       minute=minute)
+                       minute=minute, start_date=start_date)
     # The gap is derived, not chosen: slots spread across a 12-hour span, so
     # it falls out of per_day. Worth returning because "3 a day" does not
     # tell you whether that means every 4 hours or three in a row.

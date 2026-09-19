@@ -483,6 +483,16 @@ def title_clips(clips: list[dict], instructions: str | None = None
 
     except Exception as e:
         detail = " ".join(str(e).split())[:200]
+        # "!" puts this on the page. Without it a run with no credit
+        # finished looking clean and shipped 32 transcript lines as titles.
+        money = "credit balance is too low" in detail
+        if money:
+            print("! No Anthropic credit, so these clips have no titles, "
+                  "descriptions or tags, and Claude did not pick them. "
+                  "Add credit, then re-title this project.")
+        else:
+            print(f"! Titles unavailable ({type(e).__name__}) - clips kept a "
+                  f"transcript line as their title.")
         print(f"      (titles unavailable: {type(e).__name__}: {detail})")
         return None
 
@@ -588,6 +598,9 @@ def rerank(candidates: list[dict], max_clips: int,
         # Include the message - a bare exception name is useless for
         # diagnosing a 400, and this path is the one that silently degrades.
         detail = " ".join(str(e).split())[:200]
+        if "credit balance is too low" in detail:
+            print("! No Anthropic credit, so Claude did not choose these "
+                  "clips - they were picked by the fallback scoring.")
         print(f"      (Claude rerank unavailable: {type(e).__name__}: {detail} "
               f"— keeping heuristic order)")
         return None
