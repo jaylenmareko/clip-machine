@@ -679,6 +679,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
         elif route == "/api/library":
             self._send_json(_library())
+        elif route == "/api/views":
+            # One flat call across every project's posted clips, not one
+            # per project - view_counts already batches into 1-unit calls,
+            # so this is 1-2 Google requests total no matter how many
+            # projects or clips are on screen.
+            if not youtube.views_configured():
+                self._send_json({})
+                return
+            ids = {}
+            for r in publish.history():
+                if (r.get("platform") == "youtube" and r.get("status") == "posted"
+                        and r.get("url")):
+                    vid = r["url"].rstrip("/").split("/")[-1]
+                    if vid:
+                        ids[vid] = None
+            self._send_json(youtube.view_counts(list(ids)))
         elif route == "/api/upload/status":
             left = max(0, youtube.MAX_UPLOADS_PER_DAY - youtube.uploads_today())
             self._send_json({**_upload, "api_left": left})
@@ -1186,6 +1202,7 @@ PAGE = r"""<!doctype html>
   .stamp b{font-size:19px;font-weight:800;letter-spacing:.06em;
     line-height:1.15;color:#fff;text-shadow:0 2px 10px #000a}
   .stamp span{font-size:12px;color:#dfe6f2;text-shadow:0 1px 6px #000a}
+  .stamp .views{display:block;font-weight:700;color:#fff;margin-top:1px}
   .stamp.soon b{color:#7fb2ff}
   .stamp.done b{color:#5fd08a}
   .stamp.bad  b{color:#e8615e}
@@ -2251,7 +2268,7 @@ function card(c, vid){
     <div class="media">
       <video src="${src}" controls preload="metadata"
         ${c.thumb?`poster="/clips/${encodeURIComponent(vid)}/${encodeURIComponent(c.thumb)}"`:''}></video>
-      ${live?`<div class="stamp ${pubState(pub)}">
+      ${live?`<div class="stamp ${pubState(pub)}"${pub.url?` data-yt-id="${esc(pub.url.replace(/\/+$/,'').split('/').pop())}"`:''}>
         <b>${pubWord(pub)}</b><span>${pubWhen(pub)}</span></div>`:''}
       <span class="tc" data-total="${clock(c.duration)}">0:00 / ${clock(c.duration)}</span>
     </div>
@@ -2376,12 +2393,38 @@ function renderLibrary(sets, expand){
     .join('');
   $('noclips').style.display = sets.length ? 'none' : 'block';
   sets.forEach(s => updateAllBar(s.video_id));
+  // innerHTML above just wiped out any view counts a previous loadViews()
+  // wrote into the stamps - ask again rather than try to preserve them
+  // across the rebuild, which every edit/upload/retitle triggers.
+  loadViews();
 }
 
 async function library(expand){
   const lib = await (await fetch('/api/library')).json();
   renderLibrary(lib, expand);
 }
+
+// View counts only exist for clips that have actually gone public - see
+// youtube.py:view_counts for why this reads with a plain API key rather
+// than the upload-scoped OAuth token. One request covers every posted
+// clip across every project (server-side batches into 1-unit calls), and
+// a clip with no entry in the response just keeps showing its plain
+// PUBLISHED/SCHEDULED stamp - that is the correct state for something
+// still private, not a failure to report.
+async function loadViews(){
+  let views;
+  try { views = await (await fetch('/api/views')).json(); }
+  catch (err) { return; }
+  for (const [id, n] of Object.entries(views || {})){
+    const stamp = document.querySelector(`.stamp[data-yt-id="${CSS.escape(id)}"]`);
+    if (!stamp) continue;
+    let vs = stamp.querySelector('.views');
+    if (!vs){ vs = document.createElement('span'); vs.className = 'views';
+              stamp.appendChild(vs); }
+    vs.textContent = `${n.toLocaleString()} view${n===1?'':'s'}`;
+  }
+}
+setInterval(loadViews, 90000);   // refresh in place without a full re-render
 
 // --- the ring ---------------------------------------------------------
 // Eight stages is only eight jumps, and transcription alone can be minutes,

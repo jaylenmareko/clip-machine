@@ -61,6 +61,59 @@ def configured() -> bool:
     return CLIENT_SECRETS.exists()
 
 
+# --------------------------------------------------------------------------
+# view counts - a plain API key, deliberately NOT the upload OAuth token
+#
+# The stored token only carries the youtube.upload scope, which cannot read
+# statistics at all (confirmed live: 403 insufficient scope). Adding a read
+# scope there would mean asking Jaylen to re-consent through Google's
+# screen. But view/like counts on a video that has gone PUBLIC are public
+# data - anyone can see them on the page with no login - so an API key
+# (project-level, no user consent, restricted in GCP to YouTube Data API v3
+# only) reads them just as well. It returns nothing for a still-private or
+# not-yet-published video, which is the correct number anyway: nobody has
+# seen it yet. Confirmed live 2026-09-27 against three already-public clips
+# and one still-scheduled one (0 items back, no error).
+def views_configured() -> bool:
+    import os
+    return bool(os.environ.get("YOUTUBE_API_KEY"))
+
+
+def view_counts(video_ids: list[str]) -> dict[str, int]:
+    """{youtube_video_id: view count}. Silently skips whatever it can't read
+    - a private/scheduled video, a deleted one, or the call failing outright
+    (no key, no network) - callers show nothing rather than a wrong number.
+    """
+    import os
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+
+    key = os.environ.get("YOUTUBE_API_KEY")
+    ids = [i for i in dict.fromkeys(video_ids) if i]   # de-dup, keep order
+    if not key or not ids:
+        return {}
+
+    out: dict[str, int] = {}
+    try:
+        api = build("youtube", "v3", developerKey=key, cache_discovery=False)
+        # videos.list costs 1 unit total per call regardless of how many ids
+        # are batched in (up to 50) - batching isn't an optimisation here,
+        # it's what keeps 30+ cards at 1 unit instead of 30.
+        for i in range(0, len(ids), 50):
+            chunk = ids[i:i + 50]
+            resp = api.videos().list(part="statistics",
+                                     id=",".join(chunk)).execute()
+            for item in resp.get("items", []):
+                count = item.get("statistics", {}).get("viewCount")
+                if count is not None:
+                    out[item["id"]] = int(count)
+    except HttpError:
+        return out          # partial results from earlier chunks still count
+    except Exception:
+        return {}
+    return out
+
+
 def _credentials():
     """Load stored credentials, refreshing or re-authorising as needed."""
     from google.auth.transport.requests import Request
