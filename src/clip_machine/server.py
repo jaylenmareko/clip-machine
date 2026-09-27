@@ -127,19 +127,55 @@ def _progress(log: list[str]) -> dict:
 
 
 def _friendly_error(err: Exception, log: list[str]) -> str:
-    """Turn an exception into something worth showing a person."""
+    """Turn an exception into something worth showing a person.
+
+    yt-dlp failures used to be one bucket - "make sure the link is public" -
+    whether the video really was private or the Wi-Fi just dropped mid-
+    download. Both raise the same CalledProcessError with the same generic
+    "exit status 1" text, so telling them apart needs yt-dlp's own stderr,
+    which download.py now captures onto the exception (see there).
+    """
+    import subprocess as _sp
+
     text = f"{type(err).__name__}: {err}".lower()
     blob = " ".join(log[-12:]).lower()
+    # yt-dlp's real diagnostic text, when this is a yt-dlp failure - "exit
+    # status 1" tells a person nothing; this does.
+    yt_stderr = (getattr(err, "stderr", "") or "").lower()
 
     if isinstance(err, FileNotFoundError):
         return "Couldn't find that file. Check the path and try again."
     if "no speech" in text:
         return "No speech was detected in that video."
-    if any(k in text + blob for k in
-           ("yt-dlp", "unavailable", "private", "sign in", "http error 4",
-            "unsupported url", "is not a valid url")):
+
+    is_ytdlp = (isinstance(err, _sp.CalledProcessError)
+                and err.cmd and "yt-dlp" in str(err.cmd[0]))
+    if is_ytdlp or any(k in text + blob for k in
+                       ("yt-dlp", "unsupported url", "is not a valid url")):
+        # Network trouble: yt-dlp already retries internally and resumes
+        # from the partial file it kept, so the honest instruction really
+        # is just "try again" - not "check the link", which was never the
+        # problem and sent Jaylen debugging the wrong thing on 2026-09-13.
+        if any(k in yt_stderr for k in
+               ("getaddrinfo failed", "connection reset", "network is unreachable",
+                "read timed out", "timed out", "connection aborted",
+                "remote end closed", "errno 11001", "errno 111")):
+            return ("Lost the internet connection partway through. Click "
+                    "Retry - it picks up from where it stopped.")
+        if any(k in yt_stderr + blob for k in
+               ("private video", "video unavailable", "sign in to confirm",
+                "members-only", "this video is unavailable", "removed by",
+                "account associated", "http error 4")):
+            return ("Couldn't download that video. Make sure the link is "
+                    "public and playable without signing in.")
+        # A real yt-dlp failure we don't have a specific message for -
+        # surface its own first line rather than guess at a cause.
+        if yt_stderr:
+            first = yt_stderr.strip().splitlines()[-1][:160]
+            return f"Couldn't download that video. yt-dlp said: {first}"
         return ("Couldn't download that video. Make sure the link is public "
                 "and playable without signing in.")
+
     if "credit balance" in text + blob:
         return ("Claude credit ran out, so clips were ranked locally instead. "
                 "Top up at console.anthropic.com for better picks.")
@@ -1070,6 +1106,7 @@ PAGE = r"""<!doctype html>
     color:#9fb4d8;border-radius:999px;padding:2px 7px}
   .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
   .prog{display:flex;align-items:center;gap:18px}
+  .retrybtn{display:block;margin:12px 0 0;padding:7px 18px;width:auto}
   .ring{width:96px;height:96px;flex:0 0 auto;transform:rotate(-90deg)}
   .ring circle{fill:none;stroke-width:8;stroke-linecap:round}
   .ring .track{stroke:#0f131b}
@@ -1317,6 +1354,15 @@ PAGE = r"""<!doctype html>
   textarea{width:100%;background:#0f131b;border:1px solid var(--line);
     color:var(--text);border-radius:8px;padding:10px 12px;font:inherit;resize:vertical}
   textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
+  .askhelp{margin-top:8px;display:flex;align-items:center;flex-wrap:wrap;
+    gap:6px 8px;font-size:12px}
+  .askhint{color:var(--muted)}
+  .chip{background:#0f131b;border:1px solid var(--line);color:#aebbd0;
+    border-radius:999px;padding:3px 10px;font:inherit;font-size:11.5px;cursor:pointer}
+  .chip:hover{color:var(--text);border-color:#39435a}
+  .askmore{margin-left:auto;flex:0 0 auto;background:transparent;border:0;
+    color:var(--accent);font:inherit;font-size:11.5px;cursor:pointer;
+    text-decoration:underline;text-underline-offset:2px;padding:3px 0}
   .can{margin-top:8px;font-size:12px;color:var(--muted);line-height:1.6}
   .can p{margin:0}
   .can b{color:#aebbd0;font-weight:600}
@@ -1377,7 +1423,15 @@ PAGE = r"""<!doctype html>
   <div class="ask">
     <label for="say">Anything specific? <em>(optional)</em></label>
     <textarea id="say" rows="2" placeholder="e.g. only the parts about Gaza"></textarea>
-    <div class="can">
+    <div class="askhelp">
+      <span class="askhint">Steers which moments get picked and how titles read &mdash; try</span>
+      <button type="button" class="chip" data-fill="only the parts about Gaza">only the parts about Gaza</button>
+      <button type="button" class="chip" data-fill="skip the small talk">skip the small talk</button>
+      <button type="button" class="chip" data-fill="titles that ask a question">titles that ask a question</button>
+      <button type="button" class="askmore" id="askmore" aria-expanded="false"
+        aria-controls="can">What it can't do</button>
+    </div>
+    <div class="can" id="can" hidden>
       <p><b>It can act on:</b></p>
       <ul>__ACCEPTED__</ul>
       <p><b>It cannot act on:</b></p>
@@ -1407,6 +1461,7 @@ PAGE = r"""<!doctype html>
       <div class="status" id="status"></div>
     </div>
   </div>
+  <button id="retry" class="btn ghost retrybtn" hidden>Retry</button>
   <div class="notice warn" id="warning" hidden></div>
   <div class="notice" id="applied" hidden></div>
   <div class="notice warn" id="ignored" hidden></div>
@@ -2089,10 +2144,13 @@ function updateAllBar(vid){
   note.textContent = bits.join(' · ');
 }
 
-$('go').onclick = async () => {
+// Named (not an inline arrow on #go) so Retry can call the exact same
+// thing - the form fields are never cleared on error, so a retry after a
+// dropped connection is this, verbatim, not a second form to fill in.
+async function startRun(){
   const source = $('src').value.trim();
   if (!source) { $('src').focus(); return; }
-  $('go').disabled = true;
+  $('go').disabled = true; $('retry').hidden = true;
   $('log').textContent = 'Starting…';
   document.title = DEFAULT_TITLE;
   // Ask now, on a real click - browsers refuse to prompt for Notification
@@ -2110,6 +2168,24 @@ $('go').onclick = async () => {
   });
   const j = await r.json();
   if (j.error) { $('log').textContent = j.error; $('go').disabled = false; }
+}
+$('go').onclick = startRun;
+$('retry').onclick = startRun;
+
+// Chips fill the box with a working example rather than just describing
+// one - seeing "only the parts about Gaza" land in the field is a faster
+// explanation than a sentence about what the field is for.
+document.addEventListener('click', e => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  $('say').value = chip.dataset.fill;
+  $('say').focus();
+});
+$('askmore').onclick = () => {
+  const open = $('can').hidden;
+  $('can').hidden = !open;
+  $('askmore').setAttribute('aria-expanded', String(open));
+  $('askmore').textContent = open ? 'Hide' : "What it can't do";
 };
 
 // The title and its hashtags are one string in the manifest, and rendering
@@ -2499,6 +2575,7 @@ async function poll(){
       paintRing(1, s.error || 'Something went wrong.', 'err');
       $('details').open = true;
       $('go').disabled = false;
+      $('retry').hidden = false;
       if (running){ notifyFinish(false, s.error); running = false; }
     }
     const setNote = (id, label, val) => {

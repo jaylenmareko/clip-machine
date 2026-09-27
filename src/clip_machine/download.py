@@ -45,6 +45,12 @@ def get_video(source: str) -> tuple[Path, str, str, str | None]:
             # 7.5GB, fetched one fragment at a time, ~50 min of download
             # alone. At 720p the same 3h is ~2.1GB. Single-file https is
             # preferred over HLS fragments, and -N parallelises what's left.
+            # capture_output so a failure carries yt-dlp's OWN stderr on the
+            # exception - without it, a CalledProcessError says only "exit
+            # status 1", which cannot tell a private video from a dropped
+            # connection apart, and that ambiguity is what put "make sure
+            # the link is public" on a run that failed from a lost Wi-Fi
+            # connection mid-download.
             subprocess.run(
                 [
                     "yt-dlp",
@@ -59,7 +65,7 @@ def get_video(source: str) -> tuple[Path, str, str, str | None]:
                     "--no-warnings",
                     source,
                 ],
-                check=True,
+                check=True, capture_output=True, text=True,
             )
         return out_path, video_id, title, thumb
 
