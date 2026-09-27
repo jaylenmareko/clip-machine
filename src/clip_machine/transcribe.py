@@ -123,6 +123,23 @@ def _get_model(name: str | None = None):
     return _model
 
 
+def unload_model() -> None:
+    """Drop the cached Whisper model so its RAM goes back to the OS.
+
+    A finished job leaves 0.6-5GB resident in `_model` for no reason - the
+    server is idle between runs, and this laptop is already RAM-oversub-
+    scribed (reference_machine_ram_oversubscribed.md), so that idle memory
+    is exactly what has gotten the server itself killed after a run. The
+    next run reloads it in ~1s from the local HF cache, so there is no real
+    cost to dropping it.
+    """
+    global _model, _model_name
+    _model = None
+    _model_name = None
+    import gc
+    gc.collect()
+
+
 def transcribe(video_path: Path, verbose: bool = True,
                model: str | None = None) -> list[dict]:
     """Return a flat list of {word, start, end} for the whole video."""

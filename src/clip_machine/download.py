@@ -11,17 +11,32 @@ def _slugify(text: str) -> str:
     return re.sub(r"-+", "-", text).strip("-")[:60] or "video"
 
 
-def get_video(source: str) -> tuple[Path, str]:
-    """Return (local_mp4_path, video_id). Downloads if `source` looks like a URL."""
+def get_video(source: str) -> tuple[Path, str, str, str | None]:
+    """Return (local_mp4_path, video_id, title, thumbnail_url).
+
+    The title and thumbnail exist so a project folder can show what the
+    video actually IS ("Interviewing Rabbi Weiss") instead of the URL it
+    came from - `nwzvdzzcu5w` and a 90-character query string told a user
+    nothing about which of five projects was which.
+    """
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     if source.startswith("http://") or source.startswith("https://"):
-        # Ask yt-dlp for the id first so we know the output path deterministically.
-        video_id = subprocess.run(
-            ["yt-dlp", "--print", "%(id)s", "--no-warnings", source],
+        # One call for id + title + thumbnail - not three - so a slow
+        # network only costs this once. Tab-separated on one line: a real
+        # video title can contain almost anything else printable.
+        probe = subprocess.run(
+            ["yt-dlp", "--print", "%(id)s	%(title)s	%(thumbnail)s",
+             "--no-warnings", source],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
-        video_id = _slugify(video_id)
+        raw_id, _, rest = probe.partition("	")
+        title, _, thumb = rest.partition("	")
+        video_id = _slugify(raw_id)
+        title = title.strip() or video_id
+        thumb = thumb.strip() or None
+        if thumb in ("NA", "None"):
+            thumb = None
         out_path = config.WORK_DIR / f"{video_id}.mp4"
         if not out_path.exists():
             # Capped at 720p. Output is 720 wide, so anything taller is
@@ -46,9 +61,12 @@ def get_video(source: str) -> tuple[Path, str]:
                 ],
                 check=True,
             )
-        return out_path, video_id
+        return out_path, video_id, title, thumb
 
     path = Path(source).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"No such file: {path}")
-    return path, _slugify(path.stem)
+    # A local file's only title IS its filename - prettify the slug rather
+    # than show "z0jx2l3u2ew" for something the user picked off their disk.
+    pretty = re.sub(r"[_\-]+", " ", path.stem).strip().title() or path.stem
+    return path, _slugify(path.stem), pretty, None

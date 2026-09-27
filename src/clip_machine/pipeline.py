@@ -34,8 +34,8 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     t0 = time.time()
 
     print(f"[1/6] Fetching video: {source}")
-    video_path, video_id = download.get_video(source)
-    print(f"      -> {video_path.name}")
+    video_path, video_id, video_title, video_thumb = download.get_video(source)
+    print(f"      -> {video_path.name}  ({video_title})")
 
     out_dir = config.CLIPS_DIR / video_id
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -143,6 +143,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         print("[6/6] Writing manifest...")
         (out_dir / "manifest.json").write_text(
             json.dumps({"source": source, "video_id": video_id,
+                        "video_title": video_title, "video_thumb": video_thumb,
                         "mode": "compilation", "clips": manifest}, indent=2),
             encoding="utf-8")
         print(f"\nDone in {time.time() - t0:.0f}s — {out_dir}")
@@ -184,6 +185,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
             ordered = sorted(done_records, key=lambda r: r["file"])
             (out_dir / "manifest.json").write_text(
                 json.dumps({"source": source, "video_id": video_id,
+                            "video_title": video_title, "video_thumb": video_thumb,
                             "mode": mode, "partial": finished < total,
                             "clips": ordered}, indent=2),
                 encoding="utf-8")
@@ -248,8 +250,9 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     print("[6/6] Writing manifest...")
     # Final write: same content, minus the `partial` flag.
     (out_dir / "manifest.json").write_text(
-        json.dumps({"source": source, "video_id": video_id, "mode": mode,
-                    "clips": manifest}, indent=2),
+        json.dumps({"source": source, "video_id": video_id,
+                    "video_title": video_title, "video_thumb": video_thumb,
+                    "mode": mode, "clips": manifest}, indent=2),
         encoding="utf-8",
     )
 

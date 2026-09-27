@@ -14,6 +14,7 @@ import mimetypes
 import os
 import re
 import socketserver
+import sys
 import threading
 import time
 import urllib.parse
@@ -28,6 +29,11 @@ from . import (config, cut, llm, modes, pipeline, publish, transcribe,
                youtube)
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
+
+# Where main() logs to when it isn't attached to a visible console - the
+# whole reason the Desktop launcher can start it hidden (pythonw, no
+# window) without losing the diagnostics a crash needs.
+LOG_FILE = Path.home() / ".config" / "clip-machine" / "server.log"
 
 _jobs: list[dict] = []
 _job_lock = threading.Lock()
@@ -150,6 +156,7 @@ def _run_job(job: dict) -> None:
     try:
         job["status"] = "running"
         job["started"] = time.time()
+        _stay_awake(True)
         def on_clip(rec, done, total, video_id):
             # Clips land in /api/status the moment each one finishes, so the
             # page can show results while the rest are still rendering
@@ -181,6 +188,32 @@ def _run_job(job: dict) -> None:
         # forever, so a finished run's duration keeps growing and any ETA or
         # rate derived from it after the fact is nonsense.
         job["finished"] = time.time()
+        _stay_awake(False)
+        # The Whisper model is the biggest thing this process holds - free
+        # it now rather than let it sit resident until the next run, which
+        # is what made the idle server a memory-pressure target.
+        transcribe.unload_model()
+
+
+def _stay_awake(on: bool) -> None:
+    """Best-effort: stop Windows idle-sleeping while a run is in progress.
+
+    Idle sleep pauses this whole process - indistinguishable from a hang -
+    and has already cost one run its download mid-transfer. Windows-only,
+    silently does nothing elsewhere, and must never be allowed to break a
+    run by raising. Does NOT stop a lid-close sleep; that needs an admin
+    policy change on a school-managed laptop, out of reach here.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ES_CONTINUOUS = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    except Exception:
+        pass
 
 
 def _drain_queue() -> None:
@@ -491,14 +524,23 @@ def _library() -> list[dict]:
             continue
         clips = m.get("clips", [])
         feedback = _read_feedback(d.name)
+        published = publish.by_file(d.name)
         out.append({
             "video_id": d.name,
             "count": len(clips),
             "clips": clips,
             "feedback": feedback,
-            "published": publish.by_file(d.name),
+            "published": published,
+            "posted": sum(1 for p in published.values()
+                         if p.get("status") == "posted"),
             "footer": m.get("footer", ""),
             "source": m.get("source", ""),
+            # What the video actually IS, not the URL it came from - a
+            # project used to be named by a 90-character query string.
+            # video_title is missing on projects made before this existed;
+            # the page falls back to source/video_id for those.
+            "video_title": m.get("video_title") or "",
+            "video_thumb": m.get("video_thumb") or None,
             "mode": m.get("mode", ""),
             "created": int(d.stat().st_mtime),
             "total_seconds": round(sum(c.get("duration", 0) for c in clips)),
@@ -656,7 +698,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path not in ("/api/run", "/api/feedback",
                         "/api/youtube", "/api/youtube/plan",
                         "/api/clip", "/api/project", "/api/delete",
-                        "/api/upload"):
+                        "/api/upload", "/api/retitle"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -725,6 +767,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
             man["footer"] = (data.get("footer") or "").strip()[:2000]
             mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
             self._send_json({"ok": True, "footer": man["footer"]})
+            return
+
+        if path == "/api/retitle":
+            # Redo titles/descriptions/tags without re-rendering anything -
+            # the fix for a run that went out with junk titles because
+            # Anthropic credit was out, or that just needs a second pass.
+            # Blocking, like /api/youtube: same order of cost (a few Claude
+            # calls), same "the browser waits" precedent already in place.
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+
+            clips = man.get("clips", [])
+            published = publish.by_file(vid)
+            # Never touch a clip that's already on YouTube - editing here
+            # cannot reach the uploaded video, so it would just be a lie -
+            # or one a person hand-edited, which was deliberate.
+            todo = [(i, c) for i, c in enumerate(clips)
+                    if not c.get("edited")
+                    and published.get(c.get("file"), {}).get("status") != "posted"]
+            if not todo:
+                self._send_json({"error": "Every clip here is already on "
+                                          "YouTube or was edited by hand - "
+                                          "nothing left to rewrite."}, 400)
+                return
+
+            result = llm.title_clips(
+                [{"duration": c.get("duration", 0), "text": c.get("transcript", "")}
+                 for _, c in todo])
+            if result is None:
+                self._send_json(
+                    {"error": "Titles are unavailable right now - check "
+                              "Anthropic credit at console.anthropic.com "
+                              "and try again."}, 502)
+                return
+            titles, descs, _tags = result
+
+            changed = 0
+            for pos, (_, c) in enumerate(todo):
+                new_title = titles.get(pos)
+                if not new_title:
+                    continue
+                c["title"] = new_title
+                c["description"] = descs.get(pos, c.get("description", ""))
+                changed += 1
+            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "changed": changed,
+                             "asked": len(todo),
+                             "skipped": len(clips) - len(todo)})
             return
 
         if path == "/api/clip":
@@ -1065,14 +1166,18 @@ PAGE = r"""<!doctype html>
   .whyacts .btn:disabled{opacity:.4;cursor:not-allowed}
   .proj{background:var(--panel);border:1px solid var(--line);border-radius:12px;
     margin-top:14px;overflow:hidden}
-  .proj>summary{cursor:pointer;padding:14px 16px;display:flex;align-items:baseline;
+  .proj>summary{cursor:pointer;padding:14px 16px;display:flex;align-items:center;
     gap:14px;flex-wrap:wrap;list-style:none}
   .proj>summary::-webkit-details-marker{display:none}
-  .proj>summary::before{content:'B8';color:var(--muted);font-size:11px;
+  .proj>summary::before{content:'\25B8';color:var(--muted);font-size:11px;
     transition:transform .15s ease;display:inline-block}
   .proj[open]>summary::before{transform:rotate(90deg)}
   .proj>summary:hover{background:#181d27}
-  .pname{font-weight:600;font-size:13px;word-break:break-all;flex:1 1 auto}
+  .pthumb{width:44px;height:44px;border-radius:6px;object-fit:cover;
+    flex:0 0 auto;background:#0a0d13}
+  .ptitles{display:flex;flex-direction:column;gap:2px;flex:1 1 auto;min-width:0}
+  .pname{font-weight:600;font-size:13px;word-break:break-word}
+  .pstatus{font-size:12px;color:var(--muted)}
   .pmeta{display:flex;align-items:center;gap:9px;white-space:nowrap;font-size:12px}
   .pcount{color:var(--text);font-weight:600}
   .pdate{color:var(--muted)}
@@ -1593,6 +1698,38 @@ $('ftsave').onclick = async () => {
   btn.disabled = false; btn.textContent = 'Save';
 };
 
+// Rewrite titles: redo titles/descriptions/tags without re-rendering any
+// video. No modal - one click, a status line in place of the button while
+// it runs, then the cards refresh with whatever Claude wrote. A clip
+// already on YouTube or edited by hand is skipped server-side; the note
+// says how many.
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button[data-rt]');
+  if (!b) return;
+  const vid = b.dataset.rt;
+  const note = document.querySelector(`.pnote[data-vid="${CSS.escape(vid)}"]`);
+  b.disabled = true; b.textContent = 'Rewriting…';
+  if (note) note.textContent = 'Asking Claude for new titles…';
+  try {
+    const r = await fetch('/api/retitle', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: vid})
+    });
+    const j = await r.json();
+    if (j.ok) {
+      if (note) note.textContent = `Rewrote ${j.changed} of ${j.asked}`
+        + (j.skipped ? ` · ${j.skipped} already posted or edited, left alone` : '');
+      setTimeout(() => library(), 1800);   // let the note be read before it's gone
+    } else {
+      if (note) note.textContent = j.error || 'Could not rewrite titles.';
+      b.disabled = false; b.textContent = 'Rewrite titles';
+    }
+  } catch (err) {
+    if (note) note.textContent = 'Could not reach the app.';
+    b.disabled = false; b.textContent = 'Rewrite titles';
+  }
+});
+
 // Edit title / hashtags / description. The card's own text is what gets
 // edited, so the sheet is seeded from the live manifest values rather than
 // from anything cached.
@@ -1957,6 +2094,14 @@ $('go').onclick = async () => {
   if (!source) { $('src').focus(); return; }
   $('go').disabled = true;
   $('log').textContent = 'Starting…';
+  document.title = DEFAULT_TITLE;
+  // Ask now, on a real click - browsers refuse to prompt for Notification
+  // permission from anywhere else, and this is the one moment guaranteed
+  // to be a run someone actually wants telling about.
+  try {
+    if (window.Notification && Notification.permission === 'default')
+      Notification.requestPermission();
+  } catch (err) {}
   const r = await fetch('/api/run', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ source, instructions: $('say').value,
@@ -2074,16 +2219,26 @@ function projectFolder(s, open){
     date: d.toLocaleDateString([], {month:'short', day:'numeric'}),
     time: d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}),
   };
-  // A URL is the useful name; a local path is only useful as its filename.
+  // Prefer what the video actually IS. Projects made before this existed
+  // have no video_title, so fall back to the URL/filename/id exactly as
+  // before - never blank, and never worse than it already was.
   const src = s.source || '';
-  const name = /^https?:/i.test(src) ? src : (src.split(/[\\/]/).pop() || s.video_id);
+  const fallback = /^https?:/i.test(src) ? src : (src.split(/[\\/]/).pop() || s.video_id);
+  const name = s.video_title || fallback;
   const rejected = Object.values(s.feedback||{}).filter(x => x==='reject').length;
+  const posted = s.posted || 0;
+  const left = Math.max(0, s.count - posted - rejected);
 
   return `<details class="proj" data-vid="${esc(s.video_id)}" ${open?'open':''}>
     <summary>
-      <span class="pname">${esc(name)}</span>
+      ${s.video_thumb ? `<img class="pthumb" src="${esc(s.video_thumb)}" alt="" loading="lazy">` : ''}
+      <span class="ptitles">
+        <span class="pname">${esc(name)}</span>
+        <span class="pstatus">${s.count} clip${s.count===1?'':'s'}${
+          posted ? ` &middot; ${posted} posted` : ''}${
+          left && posted ? ` &middot; ${left} left` : ''}</span>
+      </span>
       <span class="pmeta">
-        <b class="pcount">${s.count} clip${s.count===1?'':'s'}</b>
         <span class="pdate">${esc(when.date)}</span>
         <span class="ptime">${esc(when.time)}</span>
         ${s.mode==='compilation'?'<span class="pkindx">compilation</span>':''}
@@ -2095,6 +2250,8 @@ function projectFolder(s, open){
       <button class="btn yt" data-yt="${esc(s.video_id)}">Schedule on YouTube…</button>
       <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
       <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Edit All</button>
+      <button class="btn ghost rt" data-rt="${esc(s.video_id)}"
+        title="Redo titles, descriptions and tags for every clip not yet posted">Rewrite titles</button>
       <button class="btn trash" data-del="${esc(s.video_id)}" title="Delete this project"
         aria-label="Delete this project">&#128465;</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
@@ -2157,7 +2314,7 @@ async function library(expand){
 //     spill into the next stage's band no matter how long the stage takes.
 const WEIGHTS = [15, 2, 40, 6, 12, 5, 35, 1];   // parallel to _STAGES
 const CIRC = 326.7;                             // 2*pi*52, matches the CSS
-let stageAt = 0, stageWas = -1;
+let stageAt = 0, stageWas = -1, downloadDoneAt = null;
 
 function mmss(n){
   n = Math.round(n || 0);
@@ -2204,10 +2361,25 @@ function ringPct(s){
 // low on a 67-min stream because it assumed transcription runs at 8x
 // realtime. Once there is a real fraction and real elapsed time, t/p beats
 // any constant and corrects itself as the run goes.
+//
+// EXCLUDING THE DOWNLOAD. Download is network-bound - a resumed or slow
+// download can burn ten minutes that say nothing about the CPU-bound
+// stages after it. Blending that into one t/p ratio is what turned a real
+// ~30-minute run into "about 53 min left": ten slow download minutes got
+// extrapolated across the whole job. So both t and frac here are rebased
+// to start at zero the moment download finishes - downloadDoneAt is set
+// once, in poll(), the first time step reaches 2.
 function etaText(s, frac){
-  const t = s.elapsed || 0;
-  if (frac > 0.04 && t > 25){
-    const left = Math.round((t / frac - t) / 60);
+  if (downloadDoneAt == null)
+    return s.eta_min ? ` · about ${s.eta_min} min total` : '';
+  const w = WEIGHTS.slice();
+  if (s.cached) w[2] = 2;
+  const total = w.reduce((a,b) => a+b, 0);
+  const dl = w[0] + w[1];                     // download + checking the video
+  const t = Math.max(0, (s.elapsed || 0) - downloadDoneAt);
+  const postFrac = Math.max(0, Math.min(1, (frac * total - dl) / (total - dl)));
+  if (postFrac > 0.04 && t > 25){
+    const left = Math.round((t / postFrac - t) / 60);
     if (left >= 1) return ` · about ${left} min left`;
     return ' · nearly done';
   }
@@ -2250,12 +2422,58 @@ function liveClips(s){
   liveShown = clips.length;
 }
 
+// A 40-minute run has nobody watching it the whole time. Say so where
+// someone who tabbed away will actually see it: the tab title (checked on
+// alt-tab even with the tab itself not visible), a system notification
+// (only offered while the tab is hidden - no point popping one over the
+// page the person is already looking at), and a short chime.
+const DEFAULT_TITLE = document.title;
+function chime(ok){
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    const notes = ok ? [523.25, 659.25, 783.99] : [246.94, 196.00];
+    let t = ctx.currentTime;
+    notes.forEach(freq => {
+      const osc = ctx.createOscillator(), gain = ctx.createGain();
+      osc.type = 'sine'; osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(t); osc.stop(t + 0.24);
+      t += 0.15;
+    });
+    setTimeout(() => { try { ctx.close(); } catch (err) {} }, notes.length * 150 + 400);
+  } catch (err) {}
+}
+function notifyFinish(ok, info){
+  const msg = ok ? `${info} clip${info===1?'':'s'} ready` : (info || 'Run failed');
+  document.title = (ok ? '✓ ' : '✗ ') + msg;
+  try {
+    if (document.hidden && window.Notification && Notification.permission === 'granted')
+      new Notification(ok ? 'Clips ready' : 'Clip run failed', {body: msg});
+  } catch (err) {}
+  chime(ok);
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) document.title = DEFAULT_TITLE;
+});
+
 async function poll(){
   try{
     const s = await (await fetch('/api/status')).json();
     if (s.status !== 'idle') $('runpanel').hidden = false;
     // Elapsed-at-stage-entry, so interpolation measures time in THIS stage.
-    if ((s.step || 0) !== stageWas){ stageWas = s.step || 0; stageAt = s.elapsed || 0; }
+    if ((s.step || 0) !== stageWas){
+      stageWas = s.step || 0; stageAt = s.elapsed || 0;
+      // Freeze the moment download ends, once, for etaText - see there for
+      // why. < 2 means a new run just started (or is still downloading);
+      // reset so the NEXT run gets its own mark instead of reusing this one.
+      if (stageWas < 2) downloadDoneAt = null;
+      else if (downloadDoneAt === null) downloadDoneAt = stageAt;
+    }
 
     if (s.status === 'queued'){
       running = true; $('go').disabled = true;
@@ -2273,12 +2491,15 @@ async function poll(){
       paintRing(1, `Done — ${s.clips.length} clip${s.clips.length===1?'':'s'} ready`, 'done');
       $('go').disabled = false;
       // Reload the whole library so the finished run appears as a project
-      // folder, expanded, rather than as a detached grid.
-      if (running){ library(s.video_id); running = false; }
+      // folder, expanded, rather than as a detached grid. Guarded by
+      // `running` so this (and the notification) fires exactly once, not
+      // on every poll tick while status stays 'done'.
+      if (running){ notifyFinish(true, s.clips.length); library(s.video_id); running = false; }
     } else if (s.status === 'error'){
       paintRing(1, s.error || 'Something went wrong.', 'err');
       $('details').open = true;
-      $('go').disabled = false; running = false;
+      $('go').disabled = false;
+      if (running){ notifyFinish(false, s.error); running = false; }
     }
     const setNote = (id, label, val) => {
       const el = $(id);
@@ -2315,8 +2536,54 @@ class _Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+class _Tee:
+    """Write to every stream given, ignoring one that's already broken.
+
+    Lets `main()` log to a file AND to a real console when one exists,
+    without changing behaviour for anyone who still runs this by hand.
+    """
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s: str) -> int:
+        for st in self.streams:
+            try:
+                st.write(s)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self) -> None:
+        for st in self.streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+
+def _open_log():
+    """Append-mode log file, trimmed once it gets past ~2MB.
+
+    This is the ONLY diagnostics a server started hidden (the Desktop
+    launcher runs it via pythonw, no console at all) leaves behind, so it
+    has to survive on its own - trimmed to stay small forever, not rotated
+    away or left to grow without bound.
+    """
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > 2_000_000:
+            LOG_FILE.write_bytes(LOG_FILE.read_bytes()[-500_000:])
+    except Exception:
+        pass
+    return open(LOG_FILE, "a", encoding="utf-8", buffering=1)
+
+
 def main() -> None:
     config.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+    log_fh = _open_log()
+    sys.stdout = _Tee(sys.stdout, log_fh)
+    sys.stderr = _Tee(sys.stderr, log_fh)
+    print(f"\n=== started {datetime.now().isoformat(timespec='seconds')} ===")
     url = f"http://127.0.0.1:{PORT}"
     print(f"ClipYourVideos.com  ->  {url}")
     free = transcribe.free_ram_gb()
