@@ -1123,12 +1123,6 @@ PAGE = r"""<!doctype html>
   .prog.err .pct{color:var(--bad)}
   #details summary{cursor:pointer;color:var(--muted);font-size:12px;margin-top:6px}
   #details pre{margin-top:8px}
-  .acts{display:flex;margin-top:10px}
-  /* Download and Reject are a stacked pair now, so they have to match
-     exactly: same padding, and a transparent 1px border to answer Reject's
-     real one, or the two sit 2px different in height. */
-  .acts .dl{flex:1 1 auto;text-align:center;padding:6px;
-    border:1px solid transparent}
   /* Deliberately NOT line-clamped. A fixed line count only aligns at one
      viewport width - descriptions run 234-291 chars, which is 6 lines on a
      wide card and 8 on a narrow one, so any clamp that fits one truncates
@@ -1138,28 +1132,33 @@ PAGE = r"""<!doctype html>
      across the row at every width and the description absorbs the slack. */
   .desc{margin:0 0 9px;font-size:12.5px;line-height:1.5;color:#a8b6cc;
     min-height:calc(2 * 1.5em)}
-  .vote{display:flex;gap:8px;margin-top:8px}
-  .vote button{flex:1;background:transparent;border:1px solid var(--line);
-    color:var(--muted);border-radius:7px;padding:6px;font:600 12px/1.4 inherit;
-    cursor:pointer}
-  .vote button:hover{color:var(--text);border-color:#39435a}
-  /* Keep was removed - a clip is kept unless it is rejected, so the button
-     asserted a state that was already the default. Reject is the only verdict
-     now, and it reads red rather than neutral-grey. */
-  .vote button.up{color:#0a1020;background:var(--accent);border-color:var(--accent);
-    font-weight:600}
-  .vote button.up:hover{color:#0a1020;border-color:var(--accent);filter:brightness(1.12)}
+  /* One obvious button per card (Upload, or Download once it's posted);
+     Edit/Remove/the second Download were equal-weight next to it on all 32
+     cards at once - now they only show on hover or keyboard focus. */
+  .cardacts{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+  .mainact{display:block;width:100%}
+  .up.mainact{color:#0a1020;background:var(--accent);border:1px solid var(--accent);
+    border-radius:7px;padding:6px;font:600 12px/1.4 inherit;cursor:pointer}
+  .up.mainact:hover{filter:brightness(1.12)}
+  .morevote{display:flex;gap:8px;opacity:0;pointer-events:none;
+    transition:opacity .12s ease}
+  .clip:hover .morevote, .clip:focus-within .morevote, .morevote.pinned{
+    opacity:1;pointer-events:auto}
+  .morevote a, .morevote button{flex:1;background:transparent;
+    border:1px solid var(--line);color:var(--muted);border-radius:7px;padding:6px;
+    font:600 12px/1.4 inherit;cursor:pointer;text-align:center;text-decoration:none}
+  .morevote a:hover, .morevote button:hover{color:var(--text);border-color:#39435a}
   .uptitle{margin:0 0 16px;font-size:14px;line-height:1.45}
   .ytrow input[type=date]{color-scheme:dark}
   .upwhen input{width:100%;margin:4px 0 12px;background:#0f131b;color:var(--text);
     border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;
     color-scheme:dark}
-  .vote button.edit{color:var(--muted);border-color:transparent;font-weight:500}
-  .vote button.edit:hover{color:var(--text);border-color:var(--line);
+  .morevote button.edit{color:var(--muted);border-color:transparent;font-weight:500}
+  .morevote button.edit:hover{color:var(--text);border-color:var(--line);
     background:#161d2a}
-  .vote button.rej{color:var(--muted);border-color:transparent;font-weight:500}
-  .vote button.rej:hover{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a}
-  .vote button.on-rej{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a;
+  .morevote button.rej{color:var(--muted);border-color:transparent;font-weight:500}
+  .morevote button.rej:hover{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a}
+  .morevote button.on-rej{color:var(--bad);border-color:#4d2c2b;background:#2a1a1a;
     font-weight:600}
   .clip.rejected{opacity:.42}
   .clip.queued{border-color:#2c4a37;box-shadow:inset 0 0 0 1px #2c4a3755}
@@ -2264,13 +2263,21 @@ function card(c, vid){
       <div class="stats">
         <span class="from">from ${clock(c.start)}</span>
         ${c.mode?`<span class="kind">${esc(c.mode)}</span>`:''}</div>
-      <div class="acts">
-        <a class="btn dl" href="${src}" download="${esc(c.file)}">Download</a>
-      </div>
-      <div class="vote">
-        ${live ? '' : `<button class="up" data-up="${esc(c.file)}" data-vid="${esc(vid)}">Upload</button>`}
-        <button class="edit" data-edit="${esc(c.file)}" data-vid="${esc(vid)}">Edit</button>
-        <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Removed · undo':'Remove'}</button>
+      <div class="cardacts">
+        <!-- One obvious action per card: Upload while it isn't posted yet,
+             Download once it is (there is nothing left to upload). Edit and
+             Remove are real but rare next to that - they used to sit at
+             equal visual weight on all 32 cards at once, which is the
+             clutter this fixes. They reveal on hover, or on keyboard focus
+             (:focus-within) so Tab still reaches them without a mouse. -->
+        ${live
+          ? `<a class="btn ghost mainact" href="${src}" download="${esc(c.file)}">Download</a>`
+          : `<button class="up mainact" data-up="${esc(c.file)}" data-vid="${esc(vid)}">Upload</button>`}
+        <div class="morevote${v==='reject'?' pinned':''}">
+          ${live ? '' : `<a class="btn ghost dl" href="${src}" download="${esc(c.file)}">Download</a>`}
+          <button class="edit" data-edit="${esc(c.file)}" data-vid="${esc(vid)}">Edit</button>
+          <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Removed · undo':'Remove'}</button>
+        </div>
       </div>
       <div class="why"${v==='reject'?'':' hidden'}>
         <textarea rows="2" placeholder="Why? (optional)">${esc(r)}</textarea>
