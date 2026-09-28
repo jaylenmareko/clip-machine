@@ -1164,7 +1164,8 @@ PAGE = r"""<!doctype html>
     border:1px solid var(--line);color:var(--muted);border-radius:7px;padding:6px;
     font:600 12px/1.4 inherit;cursor:pointer;text-align:center;text-decoration:none}
   .morevote a:hover, .morevote button:hover{color:var(--text);border-color:#39435a}
-  .uptitle{margin:0 0 16px;font-size:14px;line-height:1.45}
+  .postsub{margin:-4px 0 16px;font-size:14px;line-height:1.45;color:var(--muted)}
+  .stepq{margin:0 0 10px;font-weight:600;font-size:13px}
   .ytrow input[type=date]{color-scheme:dark}
   .upwhen input{width:100%;margin:4px 0 12px;background:#0f131b;color:var(--text);
     border:1px solid var(--line);border-radius:8px;padding:8px;font:inherit;
@@ -1531,34 +1532,68 @@ PAGE = r"""<!doctype html>
   </div>
 </div>
 
-<div class="modal" id="upmodal" hidden>
+<!-- One sheet for both scopes: a card's Upload opens #postsingle (this one
+     clip), the project bar's Post to YouTube opens #postbatch (everything
+     not yet posted). Same header, same backdrop/Cancel behaviour, same
+     place in the user's head - "post to YouTube" is one idea whether it's
+     one clip or twelve, and having it be two unrelated-looking sheets was
+     the actual confusion, not the scheduling logic underneath either one. -->
+<div class="modal" id="postmodal" hidden>
   <div class="sheet">
-    <div id="upstep1">
-      <h3>Upload this clip to YouTube?</h3>
-      <p class="uptitle" id="uptitle"></p>
-      <div class="ytacts">
-        <button class="btn ghost" id="upcancel">Cancel</button>
-        <button class="btn" id="upnext">Yes, continue</button>
+    <h3>Post to YouTube</h3>
+    <p class="postsub" id="postsub" hidden></p>
+
+    <div id="postsingle">
+      <div id="upstep1">
+        <div class="ytacts">
+          <button class="btn ghost" id="upcancel">Cancel</button>
+          <button class="btn" id="upnext">Yes, continue</button>
+        </div>
+      </div>
+      <div id="upstep2" hidden>
+        <p class="stepq">When should it go live?</p>
+        <button class="pick" id="upnow">
+          <b>Post now</b>
+          <span>Public as soon as it's uploaded</span>
+        </button>
+        <button class="pick" id="upsched">
+          <b>Schedule</b>
+          <span>Pick a date and time</span>
+        </button>
+        <div class="upwhen" id="upwhenrow" hidden>
+          <input type="datetime-local" id="upwhen">
+          <button class="btn" id="upgo">Schedule it</button>
+        </div>
+        <p class="ytnote" id="upvia" hidden></p>
+        <p class="ytleft" id="uperr" hidden></p>
+        <div class="ytacts">
+          <button class="btn ghost" id="upback">Back</button>
+        </div>
       </div>
     </div>
-    <div id="upstep2" hidden>
-      <h3>When should it go live?</h3>
-      <button class="pick" id="upnow">
-        <b>Post now</b>
-        <span>Public as soon as it's uploaded</span>
-      </button>
-      <button class="pick" id="upsched">
-        <b>Schedule</b>
-        <span>Pick a date and time</span>
-      </button>
-      <div class="upwhen" id="upwhenrow" hidden>
-        <input type="datetime-local" id="upwhen">
-        <button class="btn" id="upgo">Schedule it</button>
+
+    <div id="postbatch" hidden>
+      <div class="ytrow">
+        <label>Every <select id="ytgap">
+          <option value="2">2 hours</option>
+          <option value="3">3 hours</option>
+          <option value="4" selected>4 hours</option>
+          <option value="6">6 hours</option>
+          <option value="8">8 hours</option>
+          <option value="24">day</option>
+        </select></label>
+        <label>starting <input id="ytdate" type="date"></label>
+        <label>at <input id="ythour" type="time" value="09:00"></label>
       </div>
-      <p class="ytnote" id="upvia" hidden></p>
-      <p class="ytleft" id="uperr" hidden></p>
+      <p class="ytsum" id="ytsum">Working it out…</p>
+      <p class="draghint" id="draghint" hidden>Drag to change the order, or use <b>Take off</b> and <b>Add</b> to choose which ones go today</p>
+      <ol class="ytlist" id="ytlist"></ol>
+      <p class="ytleft" id="ytleft" hidden></p>
+      <p class="ytnote">Each video uploads private and YouTube makes it public
+        at its time. Nothing is public before then.</p>
       <div class="ytacts">
-        <button class="btn ghost" id="upback">Back</button>
+        <button class="btn ghost" id="ytcancel">Cancel</button>
+        <button class="btn" id="ytgo" disabled>Upload</button>
       </div>
     </div>
   </div>
@@ -1577,34 +1612,6 @@ PAGE = r"""<!doctype html>
     </button>
     <div class="ytacts">
       <button class="btn ghost" id="dlcancel">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<div class="modal" id="ytmodal" hidden>
-  <div class="sheet">
-    <h3>Schedule on YouTube</h3>
-    <div class="ytrow">
-      <label>Every <select id="ytgap">
-        <option value="2">2 hours</option>
-        <option value="3">3 hours</option>
-        <option value="4" selected>4 hours</option>
-        <option value="6">6 hours</option>
-        <option value="8">8 hours</option>
-        <option value="24">day</option>
-      </select></label>
-      <label>starting <input id="ytdate" type="date"></label>
-      <label>at <input id="ythour" type="time" value="09:00"></label>
-    </div>
-    <p class="ytsum" id="ytsum">Working it out…</p>
-    <p class="draghint" id="draghint" hidden>Drag to change the order, or use <b>Take off</b> and <b>Add</b> to choose which ones go today</p>
-    <ol class="ytlist" id="ytlist"></ol>
-    <p class="ytleft" id="ytleft" hidden></p>
-    <p class="ytnote">Each video uploads private and YouTube makes it public
-      at its time. Nothing is public before then.</p>
-    <div class="ytacts">
-      <button class="btn ghost" id="ytcancel">Cancel</button>
-      <button class="btn" id="ytgo" disabled>Upload</button>
     </div>
   </div>
 </div>
@@ -1693,7 +1700,9 @@ document.addEventListener('click', async e => {
   const today = `${now.getFullYear()}-${p2(now.getMonth()+1)}-${p2(now.getDate())}`;
   $('ytdate').min = today;
   if (!$('ytdate').value || $('ytdate').value < today) $('ytdate').value = today;
-  $('ytmodal').hidden = false;
+  $('postsub').hidden = true;              // ytsum carries the real headline
+  $('postbatch').hidden = false; $('postsingle').hidden = true;
+  $('postmodal').hidden = false;
   ytRefresh();
 });
 
@@ -1862,12 +1871,14 @@ document.addEventListener('click', async e => {
   if (!b) return;
   UP = {vid: b.dataset.vid, file: b.dataset.up};
   const card = b.closest('.clip');
-  $('uptitle').textContent = card.querySelector('.hook')?.title || UP.file;
+  $('postsub').textContent = card.querySelector('.hook')?.title || UP.file;
+  $('postsub').hidden = false;
   $('uperr').hidden = true;
   $('upwhenrow').hidden = true;
   $('upvia').hidden = true;
   upStep(1);
-  $('upmodal').hidden = false;
+  $('postbatch').hidden = true; $('postsingle').hidden = false;
+  $('postmodal').hidden = false;
   try {
     const s = await (await fetch('/api/upload/status')).json();
     if (s.api_left === 0) {
@@ -1878,8 +1889,7 @@ document.addEventListener('click', async e => {
     }
   } catch (err) {}
 });
-$('upcancel').onclick = () => { $('upmodal').hidden = true; };
-$('upmodal').onclick = e => { if (e.target === $('upmodal')) $('upmodal').hidden = true; };
+$('upcancel').onclick = () => { $('postmodal').hidden = true; };
 $('upnext').onclick = () => upStep(2);
 $('upback').onclick = () => { $('upwhenrow').hidden = true; upStep(1); };
 $('upsched').onclick = () => {
@@ -1910,7 +1920,7 @@ async function startUpload(mode, when){
     $('uperr').hidden = false;
     return;
   }
-  $('upmodal').hidden = true;
+  $('postmodal').hidden = true;
   UP_WATCHING = true;
   pollUpload();
 }
@@ -2114,9 +2124,12 @@ async function ytRefresh(){
 $('ytgap').onchange = ytRefresh;
 $('ythour').onchange = ytRefresh;
 $('ytdate').onchange = ytRefresh;
-$('ytcancel').onclick = () => { $('ytmodal').hidden = true; };
-$('ytmodal').onclick = e => {
-  if (e.target === $('ytmodal')) $('ytmodal').hidden = true;
+$('ytcancel').onclick = () => { $('postmodal').hidden = true; };
+// One shared backdrop-click-to-close for both bodies, now that they share
+// a single overlay - a click on either #upmodal or #ytmodal's own backdrop
+// used to close only that one; there's only one backdrop now.
+$('postmodal').onclick = e => {
+  if (e.target === $('postmodal')) $('postmodal').hidden = true;
 };
 
 $('ytgo').onclick = async () => {
@@ -2138,7 +2151,7 @@ $('ytgo').onclick = async () => {
     if (note) note.textContent = bits.join(' · ') || (j.error || 'Nothing uploaded');
     console.log('youtube', j);
   } catch (err) {}
-  $('ytmodal').hidden = true;
+  $('postmodal').hidden = true;
   go.textContent = 'Upload';
 };
 
@@ -2347,7 +2360,7 @@ function projectFolder(s, open){
     <p class="phow">Every clip below is included. <b>Remove</b> any you don't
       want, then <b>schedule</b> the rest.</p>
     <div class="pbar">
-      <button class="btn yt" data-yt="${esc(s.video_id)}">Schedule on YouTube…</button>
+      <button class="btn yt" data-yt="${esc(s.video_id)}">Post to YouTube…</button>
       <button class="btn ghost dl" data-dl="${esc(s.video_id)}">Download…</button>
       <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Edit All</button>
       <button class="btn ghost rt" data-rt="${esc(s.video_id)}"
