@@ -1110,17 +1110,6 @@ PAGE = r"""<!doctype html>
     border-radius:8px;padding:10px 12px;font:inherit}
   input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
   .row{display:grid;grid-template-columns:1fr;gap:12px}
-  .row-mode{margin-top:12px}
-  .modes{display:flex;gap:8px;flex-wrap:wrap}
-  .mode{border:1px solid var(--line);background:#0f131b;border-radius:8px;
-    padding:8px 12px;cursor:pointer;font-size:13px;color:var(--muted);user-select:none}
-  .mode:hover{border-color:#39435a;color:var(--text)}
-  .mode.on{border-color:var(--accent);color:var(--text);background:#16223a}
-  .mode small{display:block;font-size:11px;opacity:.7;margin-top:2px}
-  .chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
-  .chip{font-size:10.5px;letter-spacing:.02em;background:#1b2434;border:1px solid var(--line);
-    color:#9fb4d8;border-radius:999px;padding:2px 7px}
-  .chip.aud{background:#1d2a1f;border-color:#2c4230;color:#8fd3a0}
   .prog{display:flex;align-items:center;gap:18px}
   .retrybtn{display:block;margin:12px 0 0;padding:7px 18px;width:auto}
   .ring{width:96px;height:96px;flex:0 0 auto;transform:rotate(-90deg)}
@@ -1373,10 +1362,6 @@ PAGE = r"""<!doctype html>
   textarea:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:transparent}
   .askhelp{margin-top:8px;display:flex;align-items:center;flex-wrap:wrap;
     gap:6px 8px;font-size:12px}
-  .askhint{color:var(--muted)}
-  .chip{background:#0f131b;border:1px solid var(--line);color:#aebbd0;
-    border-radius:999px;padding:3px 10px;font:inherit;font-size:11.5px;cursor:pointer}
-  .chip:hover{color:var(--text);border-color:#39435a}
   .askmore{margin-left:auto;flex:0 0 auto;background:transparent;border:0;
     color:var(--accent);font:inherit;font-size:11.5px;cursor:pointer;
     text-decoration:underline;text-underline-offset:2px;padding:3px 0}
@@ -1441,10 +1426,6 @@ PAGE = r"""<!doctype html>
     <label for="say">Anything specific? <em>(optional)</em></label>
     <textarea id="say" rows="2" placeholder="e.g. only the parts about Gaza"></textarea>
     <div class="askhelp">
-      <span class="askhint">Steers which moments get picked and how titles read &mdash; try</span>
-      <button type="button" class="chip" data-fill="only the parts about Gaza">only the parts about Gaza</button>
-      <button type="button" class="chip" data-fill="skip the small talk">skip the small talk</button>
-      <button type="button" class="chip" data-fill="titles that ask a question">titles that ask a question</button>
       <button type="button" class="askmore" id="askmore" aria-expanded="false"
         aria-controls="can">What it can't do</button>
     </div>
@@ -2201,15 +2182,6 @@ async function startRun(){
 $('go').onclick = startRun;
 $('retry').onclick = startRun;
 
-// Chips fill the box with a working example rather than just describing
-// one - seeing "only the parts about Gaza" land in the field is a faster
-// explanation than a sentence about what the field is for.
-document.addEventListener('click', e => {
-  const chip = e.target.closest('.chip');
-  if (!chip) return;
-  $('say').value = chip.dataset.fill;
-  $('say').focus();
-});
 $('askmore').onclick = () => {
   const open = $('can').hidden;
   $('can').hidden = !open;
