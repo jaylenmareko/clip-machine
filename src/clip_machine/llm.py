@@ -83,6 +83,49 @@ def _instruction_block(instructions: str | None, kind: str) -> str:
         "picking a specific speaker), ignore that part and name it in `ignored`.\n"
     )
 
+
+# Debate-format sources are titled "X VS Y" (Jaylen's own convention). This
+# is the ONLY vision-free way to know who's in a video at all - the two
+# identifiers are real (a name, or a descriptor like "White South African"),
+# so a title can use the right one on the rare clip where the transcript
+# itself makes clear who's talking, instead of staying silent (the only
+# option before) or guessing a descriptor from scratch.
+_VS_RE = re.compile(r"\s+(?:vs\.?|versus)\s+", re.IGNORECASE)
+
+
+def video_participants(video_title: str | None) -> tuple[str, str] | None:
+    """("Marquett", "White South African") from "Marquett VS White South
+    African", or None when the title isn't that shape. Silent no-op on a
+    non-match is deliberate - most sources aren't a VS title at all.
+    """
+    title = (video_title or "").strip()
+    if not title:
+        return None
+    parts = _VS_RE.split(title, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    a, b = parts[0].strip(), parts[1].strip()
+    if not a or not b or len(a) > 60 or len(b) > 60:
+        return None
+    return a, b
+
+
+def _participants_block(participants: tuple[str, str] | None) -> str:
+    """Render the two known identifiers into the prompt, or return nothing."""
+    if not participants:
+        return ""
+    a, b = participants
+    return (
+        f"\n\nTHIS VIDEO IS: \"{a}\" vs \"{b}\" (from the video's own title - "
+        "these are real, not a guess). The same rule above still applies "
+        "unchanged: use one of these two ONLY when a clip's own words make "
+        f"clear which of them is talking ({a} or {b} self-identifies, or is "
+        "directly addressed by that name/descriptor). This does not loosen "
+        "the bar - it only means that when the bar IS met, use the real "
+        "identifier instead of a vague one or none at all. Most clips still "
+        "won't meet that bar, and that's correct - stay silent on those.\n"
+    )
+
 _SYSTEM = """You rank candidate clips cut from a longform video transcript.
 
 You are choosing which moments become standalone short-form videos. Judge each
@@ -198,6 +241,10 @@ guest, or both trading lines. You therefore cannot tell who said anything.
   says") when the clip's OWN WORDS establish it - the speaker says "as a
   Muslim" or the exchange names them. Never from the channel, the topic,
   or a guess.
+- A "THIS VIDEO IS:" line below, when present, names the two real people
+  or descriptors in a VS-format video. It does not change this rule - the
+  clip's own words still have to establish who's talking before either
+  name is usable. It only means: when they do, use the real one.
 - Default to attributing NOTHING. State the point itself: "Real loyalty
   takes ten years to prove", not "<someone> says real loyalty...". This is
   what the title is for anyway - the lesson, not the speaker.
@@ -317,7 +364,8 @@ def _with_hashtags(title: str, tags: list[str], limit: int = 100) -> str:
 
 
 def _title_batch(client, clips: list[dict], offset: int,
-                 instructions: str | None
+                 instructions: str | None,
+                 participants: tuple[str, str] | None = None,
                  ) -> tuple[dict[int, str], dict[int, str],
                             dict[int, list[str]], int, int]:
     """Title one batch. Returns (titles, descriptions, tags, in_tokens, out)."""
@@ -330,6 +378,7 @@ def _title_batch(client, clips: list[dict], offset: int,
         f"Write one title and one description for each of these "
         f"{len(clips)} clips."
         + _instruction_block(instructions, "how the titles are written")
+        + _participants_block(participants)
         + f"\n\n{listing}\n\n"
         + f"Return ONLY JSON, with a title, a description AND tags for every "
           f"one of these clip numbers ({numbers}):\n"
@@ -421,7 +470,8 @@ def _title_batch(client, clips: list[dict], offset: int,
             used.output_tokens if used else 0)
 
 
-def title_clips(clips: list[dict], instructions: str | None = None
+def title_clips(clips: list[dict], instructions: str | None = None,
+                video_title: str | None = None,
                 ) -> tuple[dict[int, str], dict[int, str],
                            dict[int, list[str]]] | None:
     """Title and describe each clip.
@@ -430,6 +480,11 @@ def title_clips(clips: list[dict], instructions: str | None = None
     All come from one call per batch - the model needs the clip in front of
     it either way, and a second pass would double the cost to re-read the
     same transcript. Titles are returned with hashtags already guaranteed.
+
+    `video_title` is the SOURCE video's own title, e.g. "Marquett VS White
+    South African" - parsed once here (not per-batch) for the two real
+    participant identifiers a title may use, under the existing
+    self-ID/direct-address bar. See video_participants().
     """
     if not clips:
         return None
@@ -438,6 +493,7 @@ def title_clips(clips: list[dict], instructions: str | None = None
     except ImportError:
         return None
 
+    participants = video_participants(video_title)
     try:
         client = anthropic.Anthropic()
         out: dict[int, str] = {}
@@ -447,7 +503,7 @@ def title_clips(clips: list[dict], instructions: str | None = None
         for offset in range(0, len(clips), TITLES_PER_CALL):
             batch = clips[offset:offset + TITLES_PER_CALL]
             got, gotd, gott, i_tok, o_tok = _title_batch(client, batch, offset,
-                                                         instructions)
+                                                         instructions, participants)
             out.update(got)
             descs.update(gotd)
             tags.update(gott)

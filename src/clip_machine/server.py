@@ -857,7 +857,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             result = llm.title_clips(
                 [{"duration": c.get("duration", 0), "text": c.get("transcript", "")}
-                 for _, c in todo])
+                 for _, c in todo],
+                video_title=man.get("video_title"))
             if result is None:
                 self._send_json(
                     {"error": "Titles are unavailable right now - check "
