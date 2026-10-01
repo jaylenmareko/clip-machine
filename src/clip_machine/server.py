@@ -25,8 +25,8 @@ from pathlib import Path
 
 from . import studio
 
-from . import (config, cut, llm, modes, pipeline, publish, transcribe,
-               youtube)
+from . import (captions as captions_mod, config, cut, download, llm, modes,
+               pipeline, publish, transcribe, youtube)
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -755,7 +755,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path not in ("/api/run", "/api/feedback",
                         "/api/youtube", "/api/youtube/plan",
                         "/api/clip", "/api/project", "/api/delete",
-                        "/api/upload", "/api/retitle"):
+                        "/api/upload", "/api/retitle", "/api/refit"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -884,6 +884,98 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_json({"ok": True, "changed": changed,
                              "asked": len(todo),
                              "skipped": len(clips) - len(todo)})
+            return
+
+        if path == "/api/refit":
+            # Fixes a wrong auto-detected layout (e.g. a two-person debate
+            # that got center-cropped) without redoing the expensive parts.
+            # The source video is never deleted and the transcript is
+            # cached, so this is just cut.render_clip() again per clip.
+            vid = (data.get("video_id") or "").strip()
+            if not vid or "/" in vid or ".." in vid:
+                self._send_json({"error": "Couldn't tell which project that was."}, 400)
+                return
+            new_layout = data.get("layout")
+            if new_layout not in cut.LAYOUTS:
+                self._send_json({"error": "Pick a layout to switch to."}, 400)
+                return
+            new_swap = data.get("swap") is True
+
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+
+            source = man.get("source", "")
+            if not source:
+                self._send_json({"error": "This project has no source "
+                                          "recorded - can't find the "
+                                          "original video."}, 400)
+                return
+            try:
+                video_path, video_id, _t, _th = download.get_video(source)
+            except Exception as e:
+                self._send_json({"error": f"Could not reach the source "
+                                          f"video: {type(e).__name__}"}, 500)
+                return
+
+            clips = man.get("clips", [])
+            published = publish.by_file(vid)
+            # Same rule as /api/retitle: a clip already on YouTube can't be
+            # fixed by re-cutting the local file - that needs a re-upload,
+            # a separate, quota-costing action the user does on purpose.
+            todo = [c for c in clips
+                    if published.get(c.get("file"), {}).get("status") != "posted"]
+            skipped = len(clips) - len(todo)
+            if not todo:
+                self._send_json({"error": "Every clip here is already on "
+                                          "YouTube - nothing left to fix."}, 400)
+                return
+
+            want_caps = bool(man.get("captions"))
+            words = None
+            if want_caps:
+                asr_model = config.transcribe_model(True)
+                words_cache = config.WORK_DIR / f"{video_id}.{asr_model}.words.json"
+                if words_cache.exists():
+                    words = json.loads(words_cache.read_text(encoding="utf-8-sig"))
+                else:
+                    # Cache is gone - re-cut without captions rather than
+                    # fail the whole fix over a missing side file.
+                    want_caps = False
+
+            out_dir = config.CLIPS_DIR / vid
+            fixed = 0
+            for c in todo:
+                file = c.get("file")
+                if not file:
+                    continue
+                cap_file = None
+                if want_caps and words is not None:
+                    cap_file = captions_mod.build_ass(
+                        words, c["start"], c["end"],
+                        config.WORK_DIR / f"{video_id}.refit.{file}.ass",
+                        (config.OUT_WIDTH, config.OUT_HEIGHT))
+                try:
+                    cut.render_clip(video_path, c["start"], c["end"],
+                                    out_dir / file, layout=new_layout,
+                                    swap=new_swap, caption_file=cap_file)
+                except Exception:
+                    continue  # leave that one clip as it was, don't fail the batch
+                thumb_name = c.get("thumb")
+                if thumb_name:
+                    cut.make_thumbnail(out_dir / file, out_dir / thumb_name)
+                fixed += 1
+
+            man["layout"] = new_layout
+            man["swap"] = new_swap
+            mpath.write_text(json.dumps(man, indent=2), encoding="utf-8")
+            self._send_json({"ok": True, "fixed": fixed, "skipped": skipped})
             return
 
         if path == "/api/clip":
