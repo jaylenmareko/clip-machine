@@ -1141,14 +1141,22 @@ PAGE = r"""<!doctype html>
      Edit/Remove/the second Download were equal-weight next to it on all 32
      cards at once - now they only show on hover or keyboard focus. */
   .cardacts{display:flex;flex-direction:column;gap:6px;margin-top:10px}
-  .mainact{display:block;width:100%}
+  .mainrow{display:flex;gap:6px}
+  .mainact{display:block;flex:1 1 auto;min-width:0}
   .up.mainact{color:#0a1020;background:var(--accent);border:1px solid var(--accent);
     border-radius:7px;padding:6px;font:600 12px/1.4 inherit;cursor:pointer}
   .up.mainact:hover{filter:brightness(1.12)}
+  /* Always-visible way to reach Edit/Remove, not just hover/keyboard-focus -
+     a first-time user has no reason to try hovering a card, so hover-only
+     made those two actions invisible to anyone who hadn't already learned
+     they exist. */
+  .more{flex:0 0 auto;width:34px;background:transparent;border:1px solid var(--line);
+    color:var(--muted);border-radius:7px;cursor:pointer;font-size:16px;line-height:1}
+  .more:hover, .more[aria-expanded="true"]{color:var(--text);border-color:#39435a}
   .morevote{display:flex;gap:8px;opacity:0;pointer-events:none;
     transition:opacity .12s ease}
-  .clip:hover .morevote, .clip:focus-within .morevote, .morevote.pinned{
-    opacity:1;pointer-events:auto}
+  .clip:hover .morevote, .clip:focus-within .morevote, .morevote.pinned,
+  .morevote.open{opacity:1;pointer-events:auto}
   .morevote a, .morevote button{flex:1;background:transparent;
     border:1px solid var(--line);color:var(--muted);border-radius:7px;padding:6px;
     font:600 12px/1.4 inherit;cursor:pointer;text-align:center;text-decoration:none}
@@ -1480,6 +1488,20 @@ PAGE = r"""<!doctype html>
   </div>
 </div>
 
+<div class="modal" id="rtmodal" hidden>
+  <div class="sheet">
+    <h3>Rewrite titles?</h3>
+    <p class="delsum">Asks Claude for a new title, description and tags for
+      every clip here that isn't posted yet and hasn't been hand-edited.</p>
+    <p class="ytnote">Replaces what's there now. The old titles and
+      descriptions can't be recovered.</p>
+    <div class="ytacts">
+      <button class="btn ghost" id="rtcancel">Cancel</button>
+      <button class="btn" id="rtgo">Rewrite</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="ftmodal" hidden>
   <div class="sheet">
     <h3>Add to all descriptions</h3>
@@ -1611,6 +1633,28 @@ const FEEDBACK = {};
 const PUBLISHED = {};
 const FOOTERS = {};   // video_id -> {file: 'keep'|'reject'}
 let CURRENT_VID = null;
+
+// The "..." button: an always-visible way to reach Edit/Remove, on top of
+// the existing hover/keyboard-focus reveal. One open at a time - clicking
+// a second card's "..." closes the first, and clicking anywhere else on
+// the page closes whichever is open, so cards never get stuck expanded.
+function closeMore(except){
+  document.querySelectorAll('.morevote.open').forEach(el => {
+    if (el === except) return;
+    el.classList.remove('open');
+    const btn = el.closest('.cardacts')?.querySelector('[data-more]');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  });
+}
+document.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-more]');
+  if (!btn){ closeMore(); return; }
+  const menu = btn.closest('.cardacts').querySelector('.morevote');
+  const opening = !menu.classList.contains('open');
+  closeMore(opening ? menu : null);
+  menu.classList.toggle('open', opening);
+  btn.setAttribute('aria-expanded', String(opening));
+});
 
 document.addEventListener('click', async e => {
   const b = e.target.closest('button[data-vote]');
@@ -1760,36 +1804,45 @@ $('ftsave').onclick = async () => {
 };
 
 // Rewrite titles: redo titles/descriptions/tags without re-rendering any
-// video. No modal - one click, a status line in place of the button while
-// it runs, then the cards refresh with whatever Claude wrote. A clip
-// already on YouTube or edited by hand is skipped server-side; the note
-// says how many.
-document.addEventListener('click', async e => {
+// video - but it overwrites what's there now with no way back, so it asks
+// first, the same as Delete. A clip already on YouTube or edited by hand is
+// skipped server-side; the note says how many.
+let RT_VID = null;
+document.addEventListener('click', e => {
   const b = e.target.closest('button[data-rt]');
   if (!b) return;
-  const vid = b.dataset.rt;
-  const note = document.querySelector(`.pnote[data-vid="${CSS.escape(vid)}"]`);
-  b.disabled = true; b.textContent = 'Rewriting…';
+  RT_VID = b.dataset.rt;
+  $('rtmodal').hidden = false;
+});
+$('rtcancel').onclick = () => { $('rtmodal').hidden = true; };
+$('rtmodal').onclick = e => {
+  if (e.target === $('rtmodal')) $('rtmodal').hidden = true;
+};
+$('rtgo').onclick = async () => {
+  const go = $('rtgo');
+  const note = document.querySelector(`.pnote[data-vid="${CSS.escape(RT_VID)}"]`);
+  go.disabled = true; go.textContent = 'Rewriting…';
   if (note) note.textContent = 'Asking Claude for new titles…';
   try {
     const r = await fetch('/api/retitle', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({video_id: vid})
+      body: JSON.stringify({video_id: RT_VID})
     });
     const j = await r.json();
+    $('rtmodal').hidden = true;
     if (j.ok) {
       if (note) note.textContent = `Rewrote ${j.changed} of ${j.asked}`
         + (j.skipped ? ` · ${j.skipped} already posted or edited, left alone` : '');
       setTimeout(() => library(), 1800);   // let the note be read before it's gone
-    } else {
-      if (note) note.textContent = j.error || 'Could not rewrite titles.';
-      b.disabled = false; b.textContent = 'Rewrite titles';
+    } else if (note) {
+      note.textContent = j.error || 'Could not rewrite titles.';
     }
   } catch (err) {
+    $('rtmodal').hidden = true;
     if (note) note.textContent = 'Could not reach the app.';
-    b.disabled = false; b.textContent = 'Rewrite titles';
   }
-});
+  go.disabled = false; go.textContent = 'Rewrite';
+};
 
 // Edit title / hashtags / description. The card's own text is what gets
 // edited, so the sheet is seeded from the live manifest values rather than
@@ -2268,13 +2321,17 @@ function card(c, vid){
       <div class="cardacts">
         <!-- One obvious action per card: Upload while it isn't posted yet,
              Download once it is (there is nothing left to upload). Edit and
-             Remove are real but rare next to that - they used to sit at
-             equal visual weight on all 32 cards at once, which is the
-             clutter this fixes. They reveal on hover, or on keyboard focus
-             (:focus-within) so Tab still reaches them without a mouse. -->
-        ${live
-          ? `<a class="btn ghost mainact" href="${src}" download="${esc(c.file)}">Download</a>`
-          : `<button class="up mainact" data-up="${esc(c.file)}" data-vid="${esc(vid)}">Upload</button>`}
+             Remove are real but rare next to that, so they stay out of the
+             way by default - but "out of the way" used to mean hover-only,
+             which a first-time user has no reason to try. The "..." button
+             is the always-visible way in; hover/focus-within still work too
+             for anyone who's already learned the shortcut. -->
+        <div class="mainrow">
+          ${live
+            ? `<a class="btn ghost mainact" href="${src}" download="${esc(c.file)}">Download</a>`
+            : `<button class="up mainact" data-up="${esc(c.file)}" data-vid="${esc(vid)}">Upload</button>`}
+          <button class="more" data-more aria-label="More actions" aria-expanded="false">&#8942;</button>
+        </div>
         <div class="morevote${v==='reject'?' pinned':''}">
           ${live ? '' : `<a class="btn ghost dl" href="${src}" download="${esc(c.file)}">Download</a>`}
           <button class="edit" data-edit="${esc(c.file)}" data-vid="${esc(vid)}">Edit</button>
