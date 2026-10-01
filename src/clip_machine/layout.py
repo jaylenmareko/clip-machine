@@ -14,6 +14,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from . import config
+
 _SAMPLES = 8
 _ANALYSIS_W = 640
 
@@ -45,6 +47,7 @@ def _duration(video_path: Path) -> float:
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "csv=p=0", str(video_path)],
             capture_output=True, text=True, check=True, timeout=60,
+            creationflags=config.WIN_NO_WINDOW,
         ).stdout.strip()
         return float(out)
     except Exception:
@@ -61,6 +64,7 @@ def _frame(video_path: Path, at: float, width: int):
              "-show_entries", "stream=width,height", "-of", "csv=p=0",
              str(video_path)],
             capture_output=True, text=True, check=True, timeout=60,
+            creationflags=config.WIN_NO_WINDOW,
         ).stdout.strip().split(",")
         sw, sh = int(probe[0]), int(probe[1])
         h = max(2, int(round(sh * (width / sw) / 2)) * 2)
@@ -70,6 +74,7 @@ def _frame(video_path: Path, at: float, width: int):
              "-frames:v", "1", "-vf", f"scale={width}:{h},format=gray",
              "-f", "rawvideo", "-pix_fmt", "gray", "-"],
             capture_output=True, check=True, timeout=120,
+            creationflags=config.WIN_NO_WINDOW,
         ).stdout
         if len(raw) < width * h:
             return None

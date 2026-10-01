@@ -4,7 +4,17 @@ Optional .env (project-local, or ~/.config/clip-machine/.env) can override
 model choices. Nothing here needs a paid service.
 """
 import os
+import subprocess
+import sys
 from pathlib import Path
+
+# The server runs as a detached, windowless `pythonw` process (see
+# launch.py) so it survives the launcher closing. With no console of its
+# own, every child subprocess (ffmpeg, yt-dlp, whisper-cli, ...) would
+# otherwise pop its own console window on Windows and close it when done -
+# a flash per call, many calls per run. Pass this as `creationflags` on
+# every pipeline subprocess call to suppress that.
+WIN_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # Secrets live OUTSIDE the repo and outside OneDrive - the school tenant syncs
 # .env files, so nothing sensitive goes in the project tree.

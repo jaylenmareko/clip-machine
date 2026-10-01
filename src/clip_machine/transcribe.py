@@ -21,6 +21,7 @@ def extract_audio(video_path: Path) -> Path:
             ["ffmpeg", "-y", "-i", str(video_path),
              "-vn", "-ac", "1", "-ar", "16000", str(audio_path)],
             check=True, capture_output=True,
+            creationflags=config.WIN_NO_WINDOW,
         )
     return audio_path
 

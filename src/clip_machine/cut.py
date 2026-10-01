@@ -112,6 +112,7 @@ def render_clip(
         ],
         check=True,
         capture_output=True,
+        creationflags=config.WIN_NO_WINDOW,
     )
     return out_path
 
@@ -128,6 +129,7 @@ def make_thumbnail(clip_path: Path, out_path: Path, at: float = 1.0) -> Path | N
              "-i", str(clip_path.resolve()), "-frames:v", "1",
              "-vf", "scale=360:-2", str(out_path.resolve())],
             check=True, capture_output=True, timeout=120,
+            creationflags=config.WIN_NO_WINDOW,
         )
         return out_path
     except Exception:

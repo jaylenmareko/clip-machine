@@ -20,7 +20,7 @@ overshooting.
 import subprocess
 from pathlib import Path
 
-from . import cut
+from . import config, cut
 
 
 def choose(clips: list[dict], target: float) -> list[dict]:
@@ -93,6 +93,7 @@ def build(video_path: Path, segments: list[dict], out_path: Path,
          "-i", str(listing.resolve()), "-c", "copy",
          "-movflags", "+faststart", str(out_path.resolve())],
         check=True, capture_output=True,
+        creationflags=config.WIN_NO_WINDOW,
     )
 
     for p in parts:

@@ -29,6 +29,7 @@ def get_video(source: str) -> tuple[Path, str, str, str | None]:
             ["yt-dlp", "--print", "%(id)s	%(title)s	%(thumbnail)s",
              "--no-warnings", source],
             capture_output=True, text=True, check=True,
+            creationflags=config.WIN_NO_WINDOW,
         ).stdout.strip()
         raw_id, _, rest = probe.partition("	")
         title, _, thumb = rest.partition("	")
@@ -66,6 +67,7 @@ def get_video(source: str) -> tuple[Path, str, str, str | None]:
                     source,
                 ],
                 check=True, capture_output=True, text=True,
+                creationflags=config.WIN_NO_WINDOW,
             )
         return out_path, video_id, title, thumb
 

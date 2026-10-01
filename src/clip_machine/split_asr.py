@@ -26,12 +26,15 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+from . import config
+
 
 def _duration(audio_path: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=nw=1:nk=1", str(audio_path)],
         capture_output=True, text=True, check=True,
+        creationflags=config.WIN_NO_WINDOW,
     ).stdout.strip()
     try:
         return float(out)
@@ -46,6 +49,7 @@ def _slice(audio_path: Path, start: float, length: float, out: Path) -> Path:
          "-t", f"{length:.3f}", "-i", str(audio_path),
          "-ac", "1", "-ar", "16000", str(out)],
         check=True, capture_output=True,
+        creationflags=config.WIN_NO_WINDOW,
     )
     return out
 

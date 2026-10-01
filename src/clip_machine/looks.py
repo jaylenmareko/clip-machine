@@ -58,6 +58,7 @@ def corner_mask(width: int, height: int, radius: int):
          "-vf", f"geq=lum='{expr}':cb=128:cr=128,format=gray",
          "-frames:v", "1", str(path)],
         check=True, capture_output=True, timeout=120,
+        creationflags=config.WIN_NO_WINDOW,
     )
     return path
 

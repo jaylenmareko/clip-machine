@@ -9,6 +9,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from . import config
+
 # astats resets every N audio frames; at 8kHz a frame is 1024 samples,
 # so reset=4 gives roughly one RMS reading every ~0.5s.
 _RESET_FRAMES = 4
@@ -26,7 +28,10 @@ def energy_timeline(audio_path: Path) -> list[tuple[float, float]]:
         "-f", "null", "-",
     ]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=900).stdout
+        out = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=900,
+            creationflags=config.WIN_NO_WINDOW,
+        ).stdout
     except Exception:
         return []
 
