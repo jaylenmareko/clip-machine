@@ -860,9 +860,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                           "nothing left to rewrite."}, 400)
                 return
 
+            instructions = (data.get("instructions") or "").strip() or None
             result = llm.title_clips(
                 [{"duration": c.get("duration", 0), "text": c.get("transcript", "")}
                  for _, c in todo],
+                instructions=instructions,
                 video_title=man.get("video_title"))
             if result is None:
                 self._send_json(
