@@ -144,7 +144,9 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         (out_dir / "manifest.json").write_text(
             json.dumps({"source": source, "video_id": video_id,
                         "video_title": video_title, "video_thumb": video_thumb,
-                        "mode": "compilation", "clips": manifest}, indent=2),
+                        "mode": "compilation", "clips": manifest,
+                        "layout": layout, "swap": swap,
+                        "captions": want_caps}, indent=2),
             encoding="utf-8")
         print(f"\nDone in {time.time() - t0:.0f}s — {out_dir}")
         return out_dir
@@ -187,7 +189,9 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
                 json.dumps({"source": source, "video_id": video_id,
                             "video_title": video_title, "video_thumb": video_thumb,
                             "mode": mode, "partial": finished < total,
-                            "clips": ordered}, indent=2),
+                            "clips": ordered,
+                            "layout": layout, "swap": swap,
+                            "captions": want_caps}, indent=2),
                 encoding="utf-8")
             if on_clip:
                 on_clip(rec, finished, total, video_id)
@@ -252,7 +256,9 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     (out_dir / "manifest.json").write_text(
         json.dumps({"source": source, "video_id": video_id,
                     "video_title": video_title, "video_thumb": video_thumb,
-                    "mode": mode, "clips": manifest}, indent=2),
+                    "mode": mode, "clips": manifest,
+                    "layout": layout, "swap": swap,
+                    "captions": want_caps}, indent=2),
         encoding="utf-8",
     )
 
