@@ -1607,6 +1607,23 @@ PAGE = r"""<!doctype html>
   </div>
 </div>
 
+<div class="modal" id="fitmodal" hidden>
+  <div class="sheet">
+    <h3>Fix framing?</h3>
+    <p class="delsum" id="fitsum"></p>
+    <label class="cap" id="fitswaprow" hidden>
+      <input type="checkbox" id="fitswap"> Put the person on the right on top
+    </label>
+    <p class="ytnote">Re-cuts every clip from this video that isn't posted
+      yet, using the video already downloaded - no re-download or
+      re-transcribe. Titles and clip selection stay the same.</p>
+    <div class="ytacts">
+      <button class="btn ghost" id="fitcancel">Cancel</button>
+      <button class="btn" id="fitgo">Fix framing</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="ftmodal" hidden>
   <div class="sheet">
     <h3>Add to all descriptions</h3>
@@ -1947,6 +1964,53 @@ $('rtgo').onclick = async () => {
     if (note) note.textContent = 'Could not reach the app.';
   }
   go.disabled = false; go.textContent = 'Rewrite';
+};
+
+// "Fix framing" - re-cut a video's unposted clips with the other layout.
+// Same shape as rewrite-titles: confirm first (it overwrites clip files
+// with no undo), server-side skips anything already posted.
+let FIT_VID = null, FIT_TARGET = null;
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-fit]');
+  if (!b) return;
+  FIT_VID = b.dataset.fit;
+  FIT_TARGET = b.dataset.curlayout === 'split' ? 'center' : 'split';
+  $('fitsum').textContent = FIT_TARGET === 'split'
+    ? 'Switches to two people, side by side (stacked top/bottom).'
+    : 'Switches to one person, single camera (centered crop).';
+  $('fitswaprow').hidden = FIT_TARGET !== 'split';
+  $('fitswap').checked = false;
+  $('fitmodal').hidden = false;
+});
+$('fitcancel').onclick = () => { $('fitmodal').hidden = true; };
+$('fitmodal').onclick = e => {
+  if (e.target === $('fitmodal')) $('fitmodal').hidden = true;
+};
+$('fitgo').onclick = async () => {
+  const go = $('fitgo');
+  const note = document.querySelector(`.pnote[data-vid="${CSS.escape(FIT_VID)}"]`);
+  go.disabled = true; go.textContent = 'Fixing…';
+  if (note) note.textContent = 'Re-cutting clips…';
+  try {
+    const r = await fetch('/api/refit', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: FIT_VID, layout: FIT_TARGET,
+                             swap: $('fitswap').checked})
+    });
+    const j = await r.json();
+    $('fitmodal').hidden = true;
+    if (j.ok) {
+      if (note) note.textContent = `Fixed ${j.fixed} clip${j.fixed===1?'':'s'}`
+        + (j.skipped ? ` · ${j.skipped} already posted, left alone` : '');
+      setTimeout(() => library(), 1800);
+    } else if (note) {
+      note.textContent = j.error || 'Could not fix framing.';
+    }
+  } catch (err) {
+    $('fitmodal').hidden = true;
+    if (note) note.textContent = 'Could not reach the app.';
+  }
+  go.disabled = false; go.textContent = 'Fix framing';
 };
 
 // Edit title / hashtags / description. The card's own text is what gets
@@ -2500,6 +2564,8 @@ function projectFolder(s, open){
       <button class="btn ghost ft" data-ft="${esc(s.video_id)}">Edit All</button>
       <button class="btn ghost rt" data-rt="${esc(s.video_id)}"
         title="Redo titles, descriptions and tags for every clip not yet posted">Rewrite titles</button>
+      <button class="btn ghost fit" data-fit="${esc(s.video_id)}" data-curlayout="${esc(s.layout)}"
+        title="Re-cut every unposted clip from this video with the other layout">Fix framing</button>
       <button class="btn trash" data-del="${esc(s.video_id)}" title="Delete this project"
         aria-label="Delete this project">&#128465;</button>
       <span class="pnote" data-vid="${esc(s.video_id)}"></span>
