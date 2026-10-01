@@ -577,6 +577,11 @@ def _library() -> list[dict]:
             # the page falls back to source/video_id for those.
             "video_title": m.get("video_title") or "",
             "video_thumb": m.get("video_thumb") or None,
+            # Missing on projects made before this was tracked - "center"
+            # matches cut.render_clip()'s own default, so an old project
+            # reads the same way it always rendered.
+            "layout": m.get("layout") or "center",
+            "swap": bool(m.get("swap")),
             "mode": m.get("mode", ""),
             "created": int(d.stat().st_mtime),
             "total_seconds": round(sum(c.get("duration", 0) for c in clips)),
