@@ -1449,6 +1449,13 @@ PAGE = r"""<!doctype html>
   <div class="row2">
     <div class="opts">
       <label class="cap"><input type="checkbox" id="caps"> Add captions</label>
+      <label class="cap">Framing
+        <select id="layout">
+          <option value="auto" selected>Let it guess</option>
+          <option value="split">Two people, side by side</option>
+          <option value="center">One person, single camera</option>
+        </select>
+      </label>
       <label class="cap"><input type="checkbox" id="swap"> Put the person on the right on top
         <span class="hint">Only for videos with two people side by side.
           Leave unchecked otherwise.</span></label>
@@ -2228,6 +2235,7 @@ async function startRun(){
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ source, instructions: $('say').value,
                            captions: $('caps').checked,
+                           layout: $('layout').value,
                            swap: $('swap').checked })
   });
   const j = await r.json();
