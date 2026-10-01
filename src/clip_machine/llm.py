@@ -390,7 +390,11 @@ def _title_batch(client, clips: list[dict], offset: int,
     kwargs = {
         "model": TITLE_MODEL,
         "max_tokens": _TITLE_MAX_TOKENS,
-        "system": _TITLE_SYSTEM,
+        "system": [{
+            "type": "text",
+            "text": _TITLE_SYSTEM,
+            "cache_control": {"type": "ephemeral"},
+        }],
         "messages": [{"role": "user", "content": prompt}],
     }
     if not TITLE_MODEL.startswith("claude-haiku"):
