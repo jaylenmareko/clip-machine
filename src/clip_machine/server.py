@@ -1665,6 +1665,19 @@ PAGE = r"""<!doctype html>
   </div>
 </div>
 
+<div class="modal" id="igmodal" hidden>
+  <div class="sheet">
+    <h3>Post to Instagram?</h3>
+    <p class="delsum">Posts this clip to your Instagram account right now
+      as a Reel. This can't be undone from here - deleting it afterward
+      means going into Instagram directly.</p>
+    <div class="ytacts">
+      <button class="btn ghost" id="igcancel">Cancel</button>
+      <button class="btn" id="iggo">Post</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="ftmodal" hidden>
   <div class="sheet">
     <h3>Add to all descriptions</h3>
@@ -2052,6 +2065,41 @@ $('fitgo').onclick = async () => {
     if (note) note.textContent = 'Could not reach the app.';
   }
   go.disabled = false; go.textContent = 'Fix framing';
+};
+
+// "Post to Instagram" - same confirm-first shape as Fix framing/Rewrite
+// titles: this is a real, irreversible-from-here public post.
+let IG_FILE = null, IG_VID = null;
+document.addEventListener('click', e => {
+  const b = e.target.closest('button[data-ig]');
+  if (!b) return;
+  IG_FILE = b.dataset.ig; IG_VID = b.dataset.vid;
+  $('igmodal').hidden = false;
+});
+$('igcancel').onclick = () => { $('igmodal').hidden = true; };
+$('igmodal').onclick = e => {
+  if (e.target === $('igmodal')) $('igmodal').hidden = true;
+};
+$('iggo').onclick = async () => {
+  const go = $('iggo');
+  go.disabled = true; go.textContent = 'Posting…';
+  try {
+    const r = await fetch('/api/instagram', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({video_id: IG_VID, file: IG_FILE})
+    });
+    const j = await r.json();
+    $('igmodal').hidden = true;
+    if (j.ok) {
+      setTimeout(() => library(), 1800);
+    } else {
+      alert(j.error || 'Could not post to Instagram.');
+    }
+  } catch (err) {
+    $('igmodal').hidden = true;
+    alert('Could not reach the app.');
+  }
+  go.disabled = false; go.textContent = 'Post';
 };
 
 // Edit title / hashtags / description. The card's own text is what gets
@@ -2545,6 +2593,7 @@ function card(c, vid){
         </div>
         <div class="morevote${v==='reject'?' pinned':''}">
           ${live ? '' : `<a class="btn ghost dl" href="${src}" download="${esc(c.file)}">Download</a>`}
+          ${live ? '' : `<button class="btn ghost ig" data-ig="${esc(c.file)}" data-vid="${esc(vid)}">Post to Instagram</button>`}
           <button class="edit" data-edit="${esc(c.file)}" data-vid="${esc(vid)}">Edit</button>
           <button data-vote="reject" class="rej${v==='reject'?' on-rej':''}">${v==='reject'?'Removed · undo':'Remove'}</button>
         </div>
