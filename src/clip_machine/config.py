@@ -156,3 +156,15 @@ OUT_HEIGHT = int(os.environ.get("CLIP_OUT_HEIGHT", "1280"))
 # rather than what somebody else's shortest short happened to be.
 CLIP_MIN_SECONDS = float(os.environ.get("CLIP_MIN_SECONDS", "35"))
 CLIP_MAX_SECONDS = float(os.environ.get("CLIP_MAX_SECONDS", "150"))
+
+# Instagram posting - Cloudflare R2 (clip storage, Meta fetches from here)
+# and the Meta Graph API. All optional: an unconfigured install just can't
+# post to Instagram, same as an unconfigured YouTube or Anthropic key.
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET = os.environ.get("R2_BUCKET", "")
+R2_PUBLIC_BASE_URL = os.environ.get("R2_PUBLIC_BASE_URL", "")
+META_APP_ID = os.environ.get("META_APP_ID", "")
+META_APP_SECRET = os.environ.get("META_APP_SECRET", "")
+IG_USER_ID = os.environ.get("IG_USER_ID", "")
