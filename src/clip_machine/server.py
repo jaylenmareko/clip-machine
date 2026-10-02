@@ -25,8 +25,8 @@ from pathlib import Path
 
 from . import studio
 
-from . import (captions as captions_mod, config, cut, download, llm, modes,
-               pipeline, publish, transcribe, youtube)
+from . import (captions as captions_mod, config, cut, download, instagram,
+               llm, modes, pipeline, publish, transcribe, youtube)
 
 PORT = int(os.environ.get("CLIP_PORT", "8420"))
 
@@ -755,7 +755,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path not in ("/api/run", "/api/feedback",
                         "/api/youtube", "/api/youtube/plan",
                         "/api/clip", "/api/project", "/api/delete",
-                        "/api/upload", "/api/retitle", "/api/refit"):
+                        "/api/upload", "/api/retitle", "/api/refit",
+                        "/api/instagram"):
             self._send_json({"error": "not found"}, 404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -1069,6 +1070,44 @@ class Handler(http.server.BaseHTTPRequestHandler):
                              args=(vid, clip, man.get("footer", ""), publish_at),
                              daemon=True).start()
             self._send_json({"ok": True})
+            return
+
+        if path == "/api/instagram":
+            vid = (data.get("video_id") or "").strip()
+            file = (data.get("file") or "").strip()
+            if not vid or not file or "/" in file or ".." in file + vid:
+                self._send_json({"error": "Couldn't tell which clip that was."}, 400)
+                return
+            if not instagram.configured():
+                self._send_json(
+                    {"error": "Instagram isn't set up yet - see .env"}, 400)
+                return
+            mpath = config.CLIPS_DIR / vid / "manifest.json"
+            if not mpath.exists():
+                self._send_json({"error": "unknown project"}, 404)
+                return
+            try:
+                man = json.loads(mpath.read_text(encoding="utf-8-sig"))
+            except Exception:
+                self._send_json({"error": "could not read that project"}, 500)
+                return
+            clip = next((c for c in man.get("clips", []) if c.get("file") == file),
+                       None)
+            if not clip:
+                self._send_json({"error": "unknown clip"}, 404)
+                return
+            clip_path = config.CLIPS_DIR / vid / file
+            cid = publish.clip_id(vid, clip.get("start", -1))
+            caption = publish.full_description(clip, man.get("footer", ""))
+            try:
+                result = instagram.post(clip_path, caption, video_id=vid,
+                                        clip_id=cid)
+            except Exception as e:
+                self._send_json(
+                    {"error": f"Could not post to Instagram: "
+                             f"{type(e).__name__}: {e}"[:300]}, 502)
+                return
+            self._send_json({"ok": True, "url": result["url"]})
             return
 
         if path == "/api/youtube/plan":
