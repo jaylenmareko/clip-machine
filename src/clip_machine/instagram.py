@@ -59,3 +59,64 @@ def upload_to_r2(clip_path: Path) -> str:
         ExtraArgs={"ContentType": "video/mp4"})
     base = config.R2_PUBLIC_BASE_URL.rstrip("/")
     return f"{base}/{key}"
+
+
+def _load_token() -> dict | None:
+    if not TOKEN_FILE.exists():
+        return None
+    try:
+        return json.loads(TOKEN_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _save_token(access_token: str, expires_in_seconds: int) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    TOKEN_FILE.write_text(json.dumps({
+        "access_token": access_token,
+        "expires_at": time.time() + expires_in_seconds,
+    }), encoding="utf-8")
+    try:
+        TOKEN_FILE.chmod(0o600)
+    except Exception:
+        pass
+
+
+def seed_token(access_token: str) -> None:
+    """One-time: hand it the long-lived token from Phase A's manual steps."""
+    _save_token(access_token, expires_in_seconds=60 * 24 * 3600)
+
+
+def _refresh(access_token: str) -> dict:
+    resp = requests.get(f"{GRAPH}/oauth/access_token", params={
+        "grant_type": "fb_exchange_token",
+        "client_id": config.META_APP_ID,
+        "client_secret": config.META_APP_SECRET,
+        "fb_exchange_token": access_token,
+    }, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _access_token() -> str:
+    """A valid token, refreshing if it's within 3 days of expiring.
+
+    Checked inline on every post attempt rather than on a schedule - there
+    is no scheduler in this MVP, and a token only needs to be valid at the
+    moment it's used.
+    """
+    tok = _load_token()
+    if not tok:
+        raise NotConfigured(
+            f"No Instagram token yet. Run instagram.seed_token(TOKEN) once "
+            f"with the long-lived token from Meta's Graph API Explorer.")
+    if tok["expires_at"] - time.time() > 3 * 24 * 3600:
+        return tok["access_token"]
+    try:
+        data = _refresh(tok["access_token"])
+        _save_token(data["access_token"], data.get("expires_in", 60 * 24 * 3600))
+        return data["access_token"]
+    except Exception:
+        # Refresh failed - the stored token might still be good for a few
+        # more days. Use it rather than fail a post over a flaky refresh.
+        return tok["access_token"]
