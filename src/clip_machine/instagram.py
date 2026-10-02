@@ -120,3 +120,72 @@ def _access_token() -> str:
         # Refresh failed - the stored token might still be good for a few
         # more days. Use it rather than fail a post over a flaky refresh.
         return tok["access_token"]
+
+
+POLL_INTERVAL_S = 5
+POLL_TIMEOUT_S = 180     # Reels can take a couple minutes to process
+
+
+def post(clip_path: Path, caption: str, video_id: str = "",
+         clip_id: str = "") -> dict:
+    """Upload a clip to R2, then post it to Instagram as a Reel.
+
+    Records the outcome in the ledger either way - same contract as
+    youtube.upload(): a caller can trust publish.by_file() afterward
+    without separately tracking what happened here.
+    """
+    cid = clip_id or publish.clip_id(video_id or "unknown", 0)
+
+    if not configured():
+        publish.record(video_id, cid, clip_path.name, "instagram", "failed",
+                       note="not configured")
+        raise NotConfigured("Instagram isn't configured - see .env")
+    if not clip_path.exists():
+        publish.record(video_id, cid, clip_path.name, "instagram", "failed",
+                       note="file missing")
+        raise FileNotFoundError(clip_path)
+
+    try:
+        token = _access_token()
+        video_url = upload_to_r2(clip_path)
+
+        create = requests.post(
+            f"{GRAPH}/{config.IG_USER_ID}/media",
+            data={"media_type": "REELS", "video_url": video_url,
+                 "caption": caption[:2200], "access_token": token},
+            timeout=60)
+        create.raise_for_status()
+        container_id = create.json()["id"]
+
+        deadline = time.time() + POLL_TIMEOUT_S
+        status = None
+        while time.time() < deadline:
+            check = requests.get(f"{GRAPH}/{container_id}", params={
+                "fields": "status_code", "access_token": token}, timeout=30)
+            check.raise_for_status()
+            status = check.json().get("status_code")
+            if status == "FINISHED":
+                break
+            if status == "ERROR":
+                raise RuntimeError("Instagram failed to process the video")
+            time.sleep(POLL_INTERVAL_S)
+        else:
+            raise TimeoutError(
+                f"Instagram didn't finish processing within {POLL_TIMEOUT_S}s")
+
+        publish_resp = requests.post(
+            f"{GRAPH}/{config.IG_USER_ID}/media_publish",
+            data={"creation_id": container_id, "access_token": token},
+            timeout=60)
+        publish_resp.raise_for_status()
+        media_id = publish_resp.json().get("id", "")
+
+    except Exception as e:
+        publish.record(video_id, cid, clip_path.name, "instagram", "failed",
+                       note=f"{type(e).__name__}: {e}"[:300])
+        raise
+
+    url = f"https://www.instagram.com/reel/{media_id}/" if media_id else None
+    publish.record(video_id, cid, clip_path.name, "instagram", "posted",
+                   url=url, note=f"container={container_id}")
+    return {"id": media_id, "url": url}
