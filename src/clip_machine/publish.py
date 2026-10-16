@@ -300,3 +300,54 @@ def by_file(video_id: str) -> dict:
                   "via": "studio" if "via=studio" in note else "api",
                   "at": r.get("at")}
     return out
+
+
+def _row_state(r: dict) -> dict:
+    """The displayable publish state carried by one ledger row."""
+    note = r.get("note") or ""
+    when = note.split("publishAt=", 1)[1].split()[0] if "publishAt=" in note else None
+    privacy = note.split("privacy=", 1)[1].split()[0] if "privacy=" in note else None
+    return {"platform": r.get("platform"), "status": r.get("status"),
+            "url": r.get("url"), "publish_at": when, "privacy": privacy,
+            "via": "studio" if "via=studio" in note else "api",
+            "at": r.get("at")}
+
+
+def by_clip_id(video_id: str) -> dict:
+    """{clip_id: latest publish state} for one project.
+
+    Like by_file(), but keyed on the clip's stable identity (source +
+    start time) rather than its filename. Re-clipping a video reuses the
+    clip_NN.mp4 names, so the same filename can hold a completely different
+    moment across runs - a filename-keyed badge then claims a fresh clip was
+    already posted. The clip_id never moves, so a badge keyed on it can't lie.
+    The last row per clip_id wins, same as by_file().
+    """
+    out: dict[str, dict] = {}
+    for r in history():
+        if r.get("video_id") != video_id or r.get("platform") == "export":
+            continue
+        cid = r.get("clip_id")
+        if cid:
+            out[cid] = _row_state(r)
+    return out
+
+
+def state_for_clips(video_id: str, clips: list[dict]) -> dict:
+    """{clip filename: publish state} for the clips in a manifest.
+
+    The badge map the UI wants: each clip is matched to the ledger by
+    clip_id, then filed under its CURRENT filename, so the frontend's
+    published[file] lookup keeps working while staying correct after a
+    re-clip. A clip with no publish history is simply absent.
+    """
+    states = by_clip_id(video_id)
+    out: dict[str, dict] = {}
+    for c in clips:
+        f = c.get("file")
+        if not f:
+            continue
+        st = states.get(clip_id(video_id, c.get("start", -1)))
+        if st:
+            out[f] = st
+    return out

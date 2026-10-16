@@ -15,6 +15,26 @@ from . import (assemble, audio_features, captions as captions_mod, config,
                score, transcribe)
 
 
+def _project_id(source_id: str) -> str:
+    """The output-folder id for this run, versioned so a re-clip can't clobber.
+
+    Clips are always named clip_01.mp4..., so a second run on the same source
+    would overwrite the first batch AND strand its posted history - the ledger
+    is keyed on this id. When a folder for `source_id` already holds a
+    manifest, this returns `source_id_v2`, `_v3`, ... so each re-run is its own
+    project and the earlier one stays intact. A fresh source keeps its plain id.
+    The transcript cache stays keyed on `source_id`, so re-clips skip the slow
+    transcription even though they render into a new folder.
+    """
+    root = config.CLIPS_DIR
+    if not (root / source_id / "manifest.json").exists():
+        return source_id
+    n = 2
+    while (root / f"{source_id}_v{n}" / "manifest.json").exists():
+        n += 1
+    return f"{source_id}_v{n}"
+
+
 def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         mode: str = "auto", layout: str = "auto",
         instructions: str | None = None,
@@ -37,8 +57,14 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     video_path, video_id, video_title, video_thumb = download.get_video(source)
     print(f"      -> {video_path.name}  ({video_title})")
 
-    out_dir = config.CLIPS_DIR / video_id
+    # The source keeps its real id for the transcript cache; the OUTPUT folder
+    # is versioned so re-clipping never overwrites an earlier batch or its
+    # posted history.
+    project_id = _project_id(video_id)
+    out_dir = config.CLIPS_DIR / project_id
     out_dir.mkdir(parents=True, exist_ok=True)
+    if project_id != video_id:
+        print(f"      -> already clipped this video; new batch -> {project_id}/")
 
     if layout == "auto":
         print("[1b/6] Detecting layout from the source...")
@@ -142,7 +168,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
         print(f"      -> {out.name}  ({total:.0f}s from {len(segments)} segments)")
         print("[6/6] Writing manifest...")
         (out_dir / "manifest.json").write_text(
-            json.dumps({"source": source, "video_id": video_id,
+            json.dumps({"source": source, "video_id": project_id,
                         "video_title": video_title, "video_thumb": video_thumb,
                         "mode": "compilation", "clips": manifest,
                         "layout": layout, "swap": swap,
@@ -186,7 +212,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
             finished += 1
             ordered = sorted(done_records, key=lambda r: r["file"])
             (out_dir / "manifest.json").write_text(
-                json.dumps({"source": source, "video_id": video_id,
+                json.dumps({"source": source, "video_id": project_id,
                             "video_title": video_title, "video_thumb": video_thumb,
                             "mode": mode, "partial": finished < total,
                             "clips": ordered,
@@ -194,7 +220,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
                             "captions": want_caps}, indent=2),
                 encoding="utf-8")
             if on_clip:
-                on_clip(rec, finished, total, video_id)
+                on_clip(rec, finished, total, project_id)
 
     done_records: list[dict] = []
 
@@ -254,7 +280,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     print("[6/6] Writing manifest...")
     # Final write: same content, minus the `partial` flag.
     (out_dir / "manifest.json").write_text(
-        json.dumps({"source": source, "video_id": video_id,
+        json.dumps({"source": source, "video_id": project_id,
                     "video_title": video_title, "video_thumb": video_thumb,
                     "mode": mode, "clips": manifest,
                     "layout": layout, "swap": swap,

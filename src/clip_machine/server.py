@@ -560,7 +560,7 @@ def _library() -> list[dict]:
             continue
         clips = m.get("clips", [])
         feedback = _read_feedback(d.name)
-        published = publish.by_file(d.name)
+        published = publish.state_for_clips(d.name, clips)
         out.append({
             "video_id": d.name,
             "count": len(clips),
@@ -848,7 +848,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             clips = man.get("clips", [])
-            published = publish.by_file(vid)
+            published = publish.state_for_clips(vid, clips)
             # Never touch a clip that's already on YouTube - editing here
             # cannot reach the uploaded video, so it would just be a lie -
             # or one a person hand-edited, which was deliberate.
@@ -928,7 +928,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             clips = man.get("clips", [])
-            published = publish.by_file(vid)
+            published = publish.state_for_clips(vid, clips)
             # Same rule as /api/retitle: a clip already on YouTube can't be
             # fixed by re-cutting the local file - that needs a re-upload,
             # a separate, quota-costing action the user does on purpose.
@@ -1038,7 +1038,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if clip is None:
                 self._send_json({"error": "no such clip"}, 404)
                 return
-            if (publish.by_file(vid).get(file) or {}).get("status") == "posted":
+            cid = publish.clip_id(vid, clip.get("start", -1))
+            if (publish.by_clip_id(vid).get(cid) or {}).get("status") == "posted":
                 self._send_json({"error": "This clip is already on YouTube."}, 409)
                 return
 
