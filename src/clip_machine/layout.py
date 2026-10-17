@@ -93,6 +93,77 @@ def _seam_ratio(img) -> float:
     return float(mid / max(gx.mean(), 1e-6))
 
 
+def _half_life(img, side: str) -> float:
+    """How 'alive' a half is: spatial detail (variance). A camera feed scores
+    high; a black bar or a mostly-static dark chat panel scores low."""
+    half = img.shape[1] // 2
+    region = img[:, :half] if side == "left" else img[:, half:]
+    return float(region.var())
+
+
+def detect_clip(video_path: Path, start: float, end: float,
+                verbose: bool = False) -> str:
+    """Per-clip layout: center / split / left / right.
+
+    Extends the project-level seam test with two things it couldn't do:
+    - runs on THIS clip's window, since composition changes within a video
+      (one segment is a full camera, another is camera + chat panel);
+    - when a half is 'dead' (black bar, or a static chat panel beside the
+      camera), returns left/right to crop to the live half instead of
+      stacking a speaker over dead space.
+
+    Motion between a frame pair separates a live camera from a static panel;
+    variance separates content from black. No face detection (it was tried and
+    fails on these sources - caps, sunglasses).
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return "center"
+
+    dur = max(end - start, 1.0)
+    pts = [start + dur * f for f in (0.2, 0.5, 0.8)]
+    seams, l_life, r_life, l_mot, r_mot = [], [], [], [], []
+    for t in pts:
+        a = _frame(video_path, t, _ANALYSIS_W)
+        if a is None:
+            continue
+        seams.append(_seam_ratio(a))
+        l_life.append(_half_life(a, "left"))
+        r_life.append(_half_life(a, "right"))
+        b = _frame(video_path, t + 0.7, _ANALYSIS_W)
+        if b is not None and b.shape == a.shape:
+            half = a.shape[1] // 2
+            d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+            l_mot.append(float(d[:, :half].mean()))
+            r_mot.append(float(d[:, half:].mean()))
+
+    if not seams:
+        return "center"
+    seam = float(np.median(seams))
+    # Liveness = detail scaled up by motion, so a scrolling-but-flat chat panel
+    # can't masquerade as a camera the way raw variance alone might.
+    ls = float(np.median(l_life)) * (1 + (float(np.median(l_mot)) if l_mot else 0))
+    rs = float(np.median(r_life)) * (1 + (float(np.median(r_mot)) if r_mot else 0))
+    imbalance = max(ls, rs) / max(min(ls, rs), 1e-6)
+
+    # Thresholds from measured clips. A genuinely dead half (black bar, static
+    # chat panel) scores a HUGE imbalance (~100x); a merely off-centre subject
+    # or a less-animated second speaker only ~4-5x, so the cut sits high at 15.
+    # Split is checked AFTER that and even under moderate imbalance, because two
+    # real camera feeds can differ in brightness/activity yet still be a split.
+    if imbalance >= 15.0:
+        choice = "left" if ls > rs else "right"      # one half is dead
+    elif seam >= 4.5:
+        choice = "split"                             # two live feeds, hard seam
+    else:
+        choice = "center"                            # one feed filling the frame
+    if verbose:
+        print(f"      clip {start:.0f}-{end:.0f}s: seam {seam:.1f}x, "
+              f"L/R life {ls:.0f}/{rs:.0f} (imbalance {imbalance:.1f}) -> {choice}")
+    return choice
+
+
 def detect(video_path: Path, verbose: bool = True) -> str:
     """Return "split" for a two-person side-by-side source, else "center"."""
     try:

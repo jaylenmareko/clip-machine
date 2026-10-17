@@ -66,8 +66,13 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
     if project_id != video_id:
         print(f"      -> already clipped this video; new batch -> {project_id}/")
 
-    if layout == "auto":
-        print("[1b/6] Detecting layout from the source...")
+    # auto = detect the layout PER CLIP at render time, because composition
+    # changes within a video (a full-camera stretch, then camera + chat panel,
+    # then a two-person split). The project-level detect() still runs as the
+    # fallback for compile mode and the manifest default.
+    auto_layout = layout == "auto"
+    if auto_layout:
+        print("[1b/6] Detecting layout (auto, per clip)...")
         layout = layout_detect.detect(video_path)
     if swap and layout != "split":
         # Only a side-by-side source has a top and bottom to swap.
@@ -226,6 +231,8 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
 
     def render_one(n: int, c: dict) -> dict:
         clip_path = out_dir / f"clip_{n:02d}.mp4"
+        clip_layout = (layout_detect.detect_clip(video_path, c["start"], c["end"])
+                       if auto_layout else layout)
         cap_file = None
         if want_caps:
             cap_file = captions_mod.build_ass(
@@ -233,7 +240,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
                 config.WORK_DIR / f"{video_id}.clip{n:02d}.ass",
                 (config.OUT_WIDTH, config.OUT_HEIGHT))
         cut.render_clip(video_path, c["start"], c["end"], clip_path,
-                        layout=layout, look=look, radius=radius,
+                        layout=clip_layout, look=look, radius=radius,
                         caption_file=cap_file, swap=swap)
         thumb = cut.make_thumbnail(clip_path, out_dir / f"clip_{n:02d}.jpg")
 
@@ -255,6 +262,7 @@ def run(source: str, max_clips: int | None = None, use_llm: bool = True,
             "bonus": c.get("bonus"),
             "viral": c.get("viral"),
             "mode": c.get("mode", mode),
+            "layout": clip_layout,
             "transcript": c["text"],
         }
 
