@@ -1,10 +1,10 @@
-"""Auto-discovery: find new on-vein VODs from the source channel to clip.
+"""Auto-discovery: find the most popular VODs from the source channel to clip.
 
 Removes the manual "go find the longform content" step. Queries the source
-channel, keeps the Israel/rabbi/debate longform it hasn't clipped yet, ranks by
-views, and writes a queue the runner can pull from. Read-only against YouTube
-(Data API key), so it's safe to schedule — the memory-heavy work is the clip
-pipeline, which the runner gates separately.
+channel, keeps the longform it hasn't clipped yet, ranks by views (most popular
+first, any topic), and writes a queue the runner can pull from. Read-only
+against YouTube (Data API key), so it's safe to schedule — the memory-heavy work
+is the clip pipeline, which the runner gates separately.
 """
 import json
 import os
@@ -16,12 +16,6 @@ from pathlib import Path
 from . import config
 
 CHANNEL_HANDLE = "TheSaintandTheSinner"
-
-# The winning vein. A VOD's title must hit one of these to be queued, so the
-# off-vein dating/money/FBA longform never gets clipped in the first place.
-VEIN = ["israel", "rabbi", "jew", "judaism", "torah", "palestin", "gaza",
-        "iran", "zion", "hebrew", "talmud", "hamas", "hezbollah", "netanyahu",
-        "antisemit", "holocaust", "mossad", "aipac"]
 
 MIN_DURATION_S = 15 * 60          # longform only; shorts/reels aren't sources
 QUEUE_FILE = config.WORK_DIR / "discovery-queue.json"
@@ -89,9 +83,7 @@ def discover(scan: int = 60) -> list[dict]:
         for v in items:
             title = v["snippet"]["title"]
             dur = _duration_s(v["contentDetails"]["duration"])
-            if (dur >= MIN_DURATION_S
-                    and any(k in title.lower() for k in VEIN)
-                    and not already_clipped(v["id"])):
+            if dur >= MIN_DURATION_S and not already_clipped(v["id"]):
                 out.append({
                     "id": v["id"],
                     "url": f"https://youtu.be/{v['id']}",
@@ -106,21 +98,27 @@ def discover(scan: int = 60) -> list[dict]:
     return out
 
 
-def backlog(terms: tuple = ("israel", "rabbi", "iran", "palestine", "gaza", "zionist")) -> list[dict]:
-    """On-vein longform VODs anywhere in the catalog, not just recent uploads.
+def backlog(pages: int = 3) -> list[dict]:
+    """The channel's MOST-VIEWED longform VODs not yet clipped, any topic.
 
     discover() only reaches recent uploads; this channel posts many per day, so
-    older Israel VODs fall out of range. search.list finds them by keyword
-    across the whole channel - a one-time backlog sweep to stock the queue.
+    its biggest hits fall out of range. search.list ordered by viewCount returns
+    the top videos across the whole channel - a one-time backlog sweep for the
+    most popular source material, regardless of subject.
     """
     ch = _get("channels", part="id", forHandle=CHANNEL_HANDLE)["items"][0]
     chid = ch["id"]
     hits: dict[str, None] = {}
-    for q in terms:
-        res = _get("search", part="id", channelId=chid, q=q, type="video",
-                   maxResults=50, order="viewCount")
+    token = None
+    for _ in range(pages):
+        res = _get("search", part="id", channelId=chid, type="video",
+                   maxResults=50, order="viewCount",
+                   **({"pageToken": token} if token else {}))
         for it in res.get("items", []):
             hits[it["id"]["videoId"]] = None
+        token = res.get("nextPageToken")
+        if not token:
+            break
 
     out = []
     ids = list(hits)
@@ -130,9 +128,7 @@ def backlog(terms: tuple = ("israel", "rabbi", "iran", "palestine", "gaza", "zio
         for v in items:
             title = v["snippet"]["title"]
             dur = _duration_s(v["contentDetails"]["duration"])
-            if (dur >= MIN_DURATION_S
-                    and any(k in title.lower() for k in VEIN)
-                    and not already_clipped(v["id"])):
+            if dur >= MIN_DURATION_S and not already_clipped(v["id"]):
                 out.append({
                     "id": v["id"],
                     "url": f"https://youtu.be/{v['id']}",
@@ -150,7 +146,7 @@ def backlog(terms: tuple = ("israel", "rabbi", "iran", "palestine", "gaza", "zio
 if __name__ == "__main__":
     import sys
     found = backlog() if "--backlog" in sys.argv else discover()
-    print(f"{len(found)} new on-vein VOD(s) to clip (queue -> {QUEUE_FILE}):\n")
+    print(f"{len(found)} VOD(s) to clip, most popular first (queue -> {QUEUE_FILE}):\n")
     for v in found:
         t = v["title"].encode("ascii", "ignore").decode()[:60]
         print(f"{v['views']:>8,} | {v['duration_min']:>4}min | {v['published']} | {v['id']} | {t}")
