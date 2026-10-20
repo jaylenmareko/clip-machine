@@ -1,14 +1,23 @@
-# ClipYourVideos.com
+# Clip-Machine
 
-Longform video in → vertical, clip-ready shorts out. Runs entirely on your machine. No API keys, no subscription, no per-video cost.
+Longform video in → vertical, clip-ready shorts out — auto-discovered, framed,
+titled, and posted to YouTube.
 
-## Install
+**Operating this autonomously? Start at [ops/CLAUDE.md](ops/CLAUDE.md)** — the
+thin operator router (discover → clip → review → post). Read that, then only the
+one `ops/reference/` shelf for the step you're on. This README is the developer
+reference for pipeline internals.
 
-```bash
-pip install -r requirements.txt
-```
+## Requirements
 
-`ffmpeg` and `yt-dlp` must be on PATH (both already are on this machine). The Whisper model downloads itself once on first run (~250MB) and is cached after.
+- `ffmpeg` and `yt-dlp` on PATH.
+- Python deps: `pip install -r requirements.txt`.
+- Whisper `tiny.en` (~75MB) auto-downloads once to `~/.cache/huggingface/hub/`
+  (or drop it there offline).
+- **Credentials in `~/.config/clip-machine/`** (never in this repo): a `.env`
+  with `ANTHROPIC_API_KEY` (scoring + titling) and `YOUTUBE_API_KEY`
+  (discovery), plus `youtube_client_secret.json` and `youtube_token.json` for
+  upload OAuth.
 
 ## Use
 

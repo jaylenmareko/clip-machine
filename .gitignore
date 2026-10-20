@@ -1,5 +1,22 @@
+# run artifacts (new every run)
 artifacts/clips/
 artifacts/_work/
+artifacts/_upload_tmp/
+artifacts/screenshots/
+
+# python
 __pycache__/
 *.pyc
+
+# credentials & secrets — must never be committed
 .env
+youtube_token.json
+youtube_client_secret.json
+cookies.txt
+*.cookies
+
+# media & model files (keep the repo code-only)
+*.mp4
+*.m4a
+*.webm
+*.bin

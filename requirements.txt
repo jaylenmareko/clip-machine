@@ -3,3 +3,9 @@ requests>=2.31.0
 opencv-python-headless
 anthropic>=0.97.0
 boto3>=1.34.0
+# YouTube upload + OAuth (youtube.py)
+google-api-python-client>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.2.0
+# source download (also usable as a PATH binary)
+yt-dlp>=2024.0.0
